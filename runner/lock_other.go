@@ -19,3 +19,6 @@ func acquireLock(name string) (func(), error) {
 }
 func processAlive(pid int) bool          { return pid == os.Getpid() }
 func checkFreeSpace(string, int64) error { return nil }
+
+// 非 Linux 仅用于测试清理规则，不模拟 Linux flock 的并发语义。
+func maintenanceLock(string) (func(), error) { return func() {}, nil }

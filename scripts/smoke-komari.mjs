@@ -2,7 +2,7 @@
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {createServer} from 'node:net';
-import {mkdir,mkdtemp,cp,readFile,writeFile,open} from 'node:fs/promises';
+import {mkdir,mkdtemp,cp,readFile,writeFile,open,stat} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {randomBytes,createDecipheriv,createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
@@ -80,7 +80,6 @@ try{
   r=await request(plugin+'/state');assert.equal(r.data.data.runs[0].status,'success');assert.ok(!JSON.stringify(r.data).includes('Local-Secret'));checks.push('real runtime accepts scoped completion and redacts secrets');
   const agentResult=await fetch(base+'/api/clients/v2/rpc?token='+encodeURIComponent(a.token),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',method:'agent.taskResult',params:{task_id:exec.params.task_id,result:'KWB_RESULT:'+JSON.stringify(result),exit_code:0,finished_at:new Date().toISOString()},id:'task-result'})});assert.equal(agentResult.status,200);
   await rpc('admin:sendNotification',{event:{event:'备份协议检查',message:'本机隔离测试，未启用外部通知通道',clients:[{uuid:a.uuid}]}});checks.push('real task-result and notification RPC signatures');
-  ws.close();await once(ws,'close');ws=undefined;
   const before=(await request(plugin+'/state')).data.data;
   const keyBefore=await readFile(join(dir,'master.key'));
   const version=JSON.parse(await readFile('package.json','utf8')).version;
@@ -92,6 +91,26 @@ try{
   const stored=JSON.parse(await readFile(join(dir,'state.enc.json'),'utf8')),decrypt=createDecipheriv('aes-256-gcm',keyBefore,Buffer.from(stored.iv,'hex'));decrypt.setAuthTag(Buffer.from(stored.tag,'hex'));
   const restored=JSON.parse(Buffer.concat([decrypt.update(Buffer.from(stored.data,'hex')),decrypt.final()]).toString());assert.equal(restored.settings.password,'Local-Secret-测试');assert.ok(restored.jobs.every(j=>!j.enabled));
   checks.push('official ZIP '+(process.env.KOMARI_PREVIOUS_PACKAGE?'upgrade from '+before.version:'reinstall')+' preserves tasks, credentials, history and disabled schedules');
+  // 升级后再走一轮真实路由，覆盖 MoeJS 的 UTF-8 截断及心跳去重。
+  const messageCount=messages.length;
+  r=await request(plugin+'/run',{jobId:jobs[0].id,mode:'test'});assert.equal(r.status,200);const diagnosticRun=r.data.data.id;
+  await waitUntil(()=>messages.slice(messageCount).some(m=>m.method==='agent.exec'));
+  const nextExec=messages.slice(messageCount).find(m=>m.method==='agent.exec');
+  const nextGrant=nextExec.params.command.match(/Authorization: Bearer ([a-f0-9]+)/)[1];
+  r=await request('/api/clients/webdav-backup/claim',{runId:diagnosticRun},false,{Authorization:'Bearer '+nextGrant});assert.equal(r.status,200);const nextToken=r.data.reportToken;
+  const heartbeatFile=join(dir,'state.enc.json'),heartbeatBefore=await readFile(heartbeatFile);
+  for(let i=0;i<3;i++){r=await request('/api/clients/webdav-backup/report',{runId:diagnosticRun,status:'running',stage:'检查备份来源'},false,{Authorization:'Bearer '+nextToken});assert.equal(r.status,200);}
+  assert.deepEqual(await readFile(heartbeatFile),heartbeatBefore);
+  const diagnosticResult={runId:diagnosticRun,status:'warning',stage:'诊断截断检查',warnings:Array(6).fill('中文'.repeat(2000))};
+  r=await request('/api/clients/webdav-backup/report',diagnosticResult,false,{Authorization:'Bearer '+nextToken});assert.equal(r.status,200);
+  const diagnostic=(await request(plugin+'/state')).data.data.runs.find(r=>r.id===diagnosticRun),text=diagnostic.warnings.join('');
+  assert.ok(Buffer.byteLength(text)<=16384);assert.match(text,/已截断/);assert.ok(!text.includes('\ufffd'));checks.push('MoeJS limits UTF-8 diagnostics and does not persist repeated heartbeats');
+  ws.close();await once(ws,'close');ws=undefined;
+  const idleFile=join(dir,'state.enc.json'),idleBytes=await readFile(idleFile),idleStat=await stat(idleFile,{bigint:true}),idleStart=performance.now();
+  // 至少跨过六次真实 cron，期间读取管理状态，不能修改状态文件。
+  while(performance.now()-idleStart<90000){await new Promise(r=>setTimeout(r,Math.min(15000,90000-(performance.now()-idleStart))));assert.equal((await request(plugin+'/state')).status,200);}
+  const idleAfter=await stat(idleFile,{bigint:true});assert.deepEqual(await readFile(idleFile),idleBytes);assert.equal(idleAfter.mtimeNs,idleStat.mtimeNs);assert.equal(idleAfter.ino,idleStat.ino);
+  checks.push('90 seconds idle: state content, mtime and inode unchanged across real cron and browser reads');
   const report={runtime:'Komari 1.6.1',host:process.platform,checks,passed:checks.length,limitations:['No production Linux Agent or real cloud WebDAV provider was connected.']};
   await writeFile('.build/komari-smoke-result.json',JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report,null,2));
 }finally{ws?.close();await stop();await log.close();}

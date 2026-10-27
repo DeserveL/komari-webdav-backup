@@ -28,6 +28,26 @@ type davEntry struct {
 	name       string
 	collection bool
 }
+type davListing struct {
+	XMLName   xml.Name   `xml:"DAV: multistatus"`
+	Other     []struct{} `xml:",any"`
+	Responses []struct {
+		Other    []struct{} `xml:",any"`
+		Href     string     `xml:"DAV: href"`
+		Status   string     `xml:"DAV: status"`
+		Propstat []struct {
+			Other  []struct{} `xml:",any"`
+			Status string     `xml:"DAV: status"`
+			Prop   struct {
+				Other []struct{} `xml:",any"`
+				Type  *struct {
+					Collection *struct{}  `xml:"DAV: collection"`
+					Other      []struct{} `xml:",any"`
+				} `xml:"DAV: resourcetype"`
+			} `xml:"DAV: prop"`
+		} `xml:"DAV: propstat"`
+	} `xml:"DAV: response"`
+}
 
 func newDAV(c Config) (*DAV, error) {
 	u, err := url.Parse(strings.TrimRight(c.WebDAVURL, "/") + "/")
@@ -198,35 +218,31 @@ func (d *DAV) deleteFile(ctx context.Context, name string) error {
 	return httpOK(res, 200, 202, 204, 404)
 }
 
-func (d *DAV) list(ctx context.Context, dir string) ([]davEntry, error) {
+func (d *DAV) readListing(ctx context.Context, dir string) (davListing, error) {
+	var result davListing
 	query := []byte(`<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>`)
 	res, err := d.request(ctx, "PROPFIND", dir+"/", bytesBody(query), map[string]string{"Depth": "1", "Content-Type": "application/xml"})
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	defer closeResponse(res)
 	if res.StatusCode != 207 {
-		return nil, fmt.Errorf("WebDAV PROPFIND HTTP %d", res.StatusCode)
-	}
-	var result struct {
-		Responses []struct {
-			Href     string `xml:"DAV: href"`
-			Propstat []struct {
-				Status string `xml:"DAV: status"`
-				Prop   struct {
-					Type struct {
-						Collection *struct{} `xml:"DAV: collection"`
-					} `xml:"DAV: resourcetype"`
-				} `xml:"DAV: prop"`
-			} `xml:"DAV: propstat"`
-		} `xml:"DAV: response"`
+		return result, fmt.Errorf("WebDAV PROPFIND HTTP %d", res.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(res.Body, (8<<20)+1))
 	if err != nil || len(data) > 8<<20 {
-		return nil, errors.New("WebDAV listing exceeds limit")
+		return result, errors.New("WebDAV listing exceeds limit")
 	}
 	if err = xml.Unmarshal(data, &result); err != nil {
-		return nil, errors.New("invalid WebDAV XML response")
+		return result, errors.New("invalid WebDAV XML response")
+	}
+	return result, nil
+}
+
+func (d *DAV) list(ctx context.Context, dir string) ([]davEntry, error) {
+	result, err := d.readListing(ctx, dir)
+	if err != nil {
+		return nil, err
 	}
 	prefix := strings.TrimRight(d.target(dir).Path, "/") + "/"
 	entries := []davEntry{}
@@ -249,7 +265,7 @@ func (d *DAV) list(ctx context.Context, dir string) ([]davEntry, error) {
 		}
 		for _, prop := range item.Propstat {
 			parts := strings.Fields(prop.Status)
-			if len(parts) >= 2 && parts[1] == "200" {
+			if len(parts) >= 2 && parts[1] == "200" && prop.Prop.Type != nil {
 				entries = append(entries, davEntry{name, prop.Prop.Type.Collection != nil})
 				seen[name] = true
 				break
@@ -259,7 +275,93 @@ func (d *DAV) list(ctx context.Context, dir string) ([]davEntry, error) {
 	return entries, nil
 }
 
-// 只删除清单验证通过的两个已知文件，不递归 DELETE 整个远端目录。
+// 删除集合前不能丢弃未知或异常条目，否则过滤后的“空目录”可能含有用户文件。
+func (d *DAV) checkRunContents(ctx context.Context, dir string, archiveAllowed bool) error {
+	result, err := d.readListing(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if len(result.Other) != 0 {
+		return errors.New("unrecognized listing content")
+	}
+	prefix := strings.TrimRight(d.target(dir).Path, "/")
+	seen := map[string]bool{}
+	self, manifest := false, false
+	for _, item := range result.Responses {
+		if len(item.Other) != 0 {
+			return errors.New("unrecognized entry properties")
+		}
+		href, e := url.Parse(item.Href)
+		if e != nil || item.Href == "" || href.RawQuery != "" || href.Fragment != "" || href.User != nil || (href.Host != "" && (href.Host != d.base.Host || href.Scheme != d.base.Scheme)) {
+			return errors.New("unrecognized directory entry")
+		}
+		if !strings.HasPrefix(href.Path, "/") {
+			href = d.target(dir + "/").ResolveReference(href)
+		}
+		p := strings.TrimSuffix(href.Path, "/")
+		if seen[p] {
+			return errors.New("duplicate directory entry")
+		}
+		seen[p] = true
+		if item.Status != "" {
+			return errors.New("directory entry status unavailable")
+		}
+		if len(item.Propstat) != 1 {
+			return errors.New("directory properties missing")
+		}
+		var collection bool
+		found := false
+		for _, prop := range item.Propstat {
+			status := strings.Fields(prop.Status)
+			if len(status) < 2 || status[1] != "200" || prop.Prop.Type == nil || len(prop.Other) != 0 || len(prop.Prop.Other) != 0 || len(prop.Prop.Type.Other) != 0 {
+				return errors.New("directory properties unavailable")
+			}
+			collection = prop.Prop.Type.Collection != nil
+			found = true
+		}
+		if !found {
+			return errors.New("directory type unavailable")
+		}
+		if p == prefix && collection {
+			self = true
+			continue
+		}
+		if collection || (p != prefix+"/manifest.json" && (!archiveAllowed || p != prefix+"/backup.tar.gz")) {
+			return errors.New("directory contains unknown content")
+		}
+		if p == prefix+"/manifest.json" {
+			manifest = true
+		}
+	}
+	if !self || !manifest {
+		return errors.New("directory listing incomplete")
+	}
+	return nil
+}
+
+func (d *DAV) deleteRunDirectory(ctx context.Context, dir string) error {
+	res, err := d.request(ctx, "DELETE", dir+"/", nil, nil)
+	if err != nil {
+		return err
+	}
+	// 202 尚未完成，207 可能只删除了部分成员，均不能直接认定目录已删除。
+	code := res.StatusCode
+	closeResponse(res)
+	if code != 200 && code != 202 && code != 204 && code != 404 {
+		return fmt.Errorf("WebDAV directory DELETE HTTP %d", code)
+	}
+	res, err = d.request(ctx, "PROPFIND", dir+"/", bytesBody([]byte(`<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>`)), map[string]string{"Depth": "0", "Content-Type": "application/xml"})
+	if err != nil {
+		return err
+	}
+	defer closeResponse(res)
+	if res.StatusCode != 404 {
+		return errors.New("remote directory removal not confirmed")
+	}
+	return nil
+}
+
+// 清单保留至最后一次集合删除，失败后仍可验证所有权并重试。
 func (d *DAV) cleanup(ctx context.Context, c Config, now time.Time) []string {
 	warnings := []string{}
 	if c.RetentionDays == 0 {
@@ -300,16 +402,24 @@ func (d *DAV) cleanup(ctx context.Context, c Config, now time.Time) []string {
 	}
 	cutoff := now.Add(-time.Duration(c.RetentionDays) * 24 * time.Hour)
 	for _, old := range valid {
-		if old.dir == keep || !old.manifest.CompletedAt.Before(cutoff) {
+		if old.dir == keep || old.dir == c.RunID || !old.manifest.CompletedAt.Before(cutoff) {
 			continue
 		}
 		base := path.Join(c.RemoteDir, old.dir)
+		if err = d.checkRunContents(ctx, base, true); err != nil {
+			warnings = append(warnings, "retention directory check failed: "+old.dir+": "+err.Error())
+			continue
+		}
 		if err = d.deleteFile(ctx, path.Join(base, "backup.tar.gz")); err != nil {
 			warnings = append(warnings, "retention archive delete failed: "+old.dir)
 			continue
 		}
-		if err = d.deleteFile(ctx, path.Join(base, "manifest.json")); err != nil {
-			warnings = append(warnings, "retention manifest delete failed: "+old.dir)
+		if err = d.checkRunContents(ctx, base, false); err != nil {
+			warnings = append(warnings, "retention directory check failed: "+old.dir+": "+err.Error())
+			continue
+		}
+		if err = d.deleteRunDirectory(ctx, base); err != nil {
+			warnings = append(warnings, "retention directory delete failed: "+old.dir+": "+err.Error())
 		}
 	}
 	return warnings

@@ -40,9 +40,15 @@ function storage() {
   if (fs.existsSync(keyFile)) key = fs.readFileSync(keyFile);
   else { if (fs.existsSync(file)) throw new Error('已有备份配置但缺少 master.key，请恢复原密钥'); key = crypto.randomBytes(32); fs.writeFileSync(keyFile, key, { mode: 0o600, flag: 'wx' }); }
   if (key.length !== 32) throw new Error('备份配置密钥无效，请恢复 master.key');
+  function save(state: State) {
+    const iv = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const data = cipher.update(JSON.stringify(state), 'utf8', 'hex') + cipher.final('hex');
+    const serialized = JSON.stringify({ version: 1, iv: iv.toString('hex'), tag: cipher.getAuthTag().toString('hex'), data });
+    fs.writeFileSync(file+'.tmp', serialized, { mode: 0o600 }); fs.renameSync(file+'.tmp', file);
+  }
   return {
     read(): State {
-      if (!fs.existsSync(file)) return defaults();
+      if (!fs.existsSync(file)) { const state = defaults(); save(state); return state; }
       const data = JSON.parse(fs.readFileSync(file, 'utf8'));
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(data.iv, 'hex'));
       decipher.setAuthTag(Buffer.from(data.tag, 'hex'));
@@ -51,12 +57,7 @@ function storage() {
       if (state.version !== 1 || !Array.isArray(state.jobs) || !Array.isArray(state.runs)) throw new Error('备份配置版本不支持');
       return state;
     },
-    save(state: State) {
-      const iv = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-      const data = cipher.update(JSON.stringify(state), 'utf8', 'hex') + cipher.final('hex');
-      const serialized = JSON.stringify({ version: 1, iv: iv.toString('hex'), tag: cipher.getAuthTag().toString('hex'), data });
-      fs.writeFileSync(file+'.tmp', serialized, { mode: 0o600 }); fs.renameSync(file+'.tmp', file);
-    },
+    save,
   };
 }
 

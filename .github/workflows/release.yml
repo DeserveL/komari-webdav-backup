@@ -28,8 +28,11 @@ jobs:
         run: |
           curl --fail --location https://github.com/komari-monitor/komari/releases/download/1.6.1/komari-linux-amd64 -o "$RUNNER_TEMP/komari"
           chmod +x "$RUNNER_TEMP/komari"
-          KOMARI_EXE="$RUNNER_TEMP/komari" node scripts/smoke-komari.mjs
+          curl --fail --location https://github.com/DeserveL/komari-webdav-backup/releases/download/v0.1.1/komari-webdav-backup-0.1.1.zip -o "$RUNNER_TEMP/previous.zip"
+          KOMARI_EXE="$RUNNER_TEMP/komari" KOMARI_PREVIOUS_PACKAGE="$RUNNER_TEMP/previous.zip" node scripts/smoke-komari.mjs
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/* --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md
+        run: |
+          node --input-type=module -e 'import fs from "node:fs"; const text=fs.readFileSync("CHANGELOG.md","utf8"); fs.writeFileSync("release-notes.md",text.split(/^## /m)[1].replace(/^[^\n]*\n/,""));'
+          gh release create "$GITHUB_REF_NAME" release/* --title "$GITHUB_REF_NAME" --notes-file release-notes.md

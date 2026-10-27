@@ -1,6 +1,7 @@
 import { RUNNER_API, defaults, Job, NodeInfo, Report, Run, RunnerConfig, Settings, State, terminal } from './types';
 import * as validate from './validation';
 import { Binaries, bootstrap } from './bootstrap';
+import { HISTORY_DAYS, HISTORY_LIMIT, limitDiagnostics } from './history';
 
 export type Host = {
   now(): number; id(): string; token(): string; hash(value: string): string;
@@ -10,11 +11,20 @@ export type Host = {
 export class BackupService {
   private ticking = false;
   private recovering = new Set<string>();
+  private dirty = false;
+  private lastMaintenance: number;
   constructor(public state: State, private host: Host) {
-    for (const run of state.runs) if (run.status === 'running' || run.status === 'dispatching') { run.status = 'pending'; run.stage = '等待核对节点执行结果'; }
-    this.persist();
+    this.lastMaintenance = host.now();
+    for (const run of state.runs) {
+      if (run.status === 'running' || run.status === 'dispatching') { run.status = 'pending'; run.stage = '等待核对节点执行结果'; this.dirty = true; }
+      const before = JSON.stringify([run.error, run.warnings, run.notificationError]);
+      limitDiagnostics(run);
+      if (before !== JSON.stringify([run.error, run.warnings, run.notificationError])) this.dirty = true;
+    }
+    this.trim(); this.flush();
   }
-  private persist() { this.host.save(this.state); }
+  private persist() { this.dirty = true; this.flush(); }
+  private flush() { if (this.dirty) { this.host.save(this.state); this.dirty = false; } }
   private iso() { return new Date(this.host.now()).toISOString(); }
   private redact(value: unknown): string {
     let s = String(value ?? '').slice(0, 6000);
@@ -25,7 +35,7 @@ export class BackupService {
     return { settings: { ...this.state.settings, password: '', passwordSet: !!this.state.settings.password },
       jobs: this.state.jobs.map(j => ({ ...j, nextRun: new Date(validate.nextSlot(j.schedule, this.host.now())).toISOString() })),
       runs: [...this.state.runs].reverse().slice(0, 200).map(r => this.publicRun(r)),
-      time: this.iso(), timezone: new Date(this.host.now()).toString(), timezoneOffset: new Date(this.host.now()).getTimezoneOffset(), version: '0.1.1' };
+      time: this.iso(), timezone: new Date(this.host.now()).toString(), timezoneOffset: new Date(this.host.now()).getTimezoneOffset(), version: '0.1.2' };
   }
   publicRun(r: Run) {
     const { config, startupHash, startupExpires, reportHash, reportExpires, recoveryHash, recoveryExpires, ...safe } = r;
@@ -34,8 +44,11 @@ export class BackupService {
   saveSettings(input: Partial<Settings>) {
     const next = validate.settings(input, this.state.settings);
     if (!next.password || next.password.length > 4096) throw new Error('请填写 WebDAV 密码（最多 4096 字符）');
-    if (JSON.stringify(next) !== JSON.stringify(this.state.settings)) for (const j of this.state.jobs) { j.enabled = false; j.lastTestAt = undefined; }
-    this.state.settings = next; this.persist();
+    if (JSON.stringify(next) !== JSON.stringify(this.state.settings)) {
+      for (const j of this.state.jobs) { j.enabled = false; j.lastTestAt = undefined; }
+      this.state.settings = next; this.persist();
+    }
+    this.flush();
     return this.view().settings;
   }
   async nodes(): Promise<NodeInfo[]> {
@@ -75,8 +88,12 @@ export class BackupService {
     this.trim(); this.persist(); return r;
   }
   private trim() {
-    const done = this.state.runs.filter(r => terminal(r.status)).slice(-500);
-    this.state.runs = [...this.state.runs.filter(r => !terminal(r.status)), ...done].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const cutoff = this.host.now() - HISTORY_DAYS * 86400_000;
+    const done = this.state.runs.filter(r => terminal(r.status) && Date.parse(r.finishedAt || r.updatedAt) >= cutoff)
+      .sort((a, b) => (b.finishedAt || b.updatedAt).localeCompare(a.finishedAt || a.updatedAt)).slice(0, HISTORY_LIMIT);
+    const keep = new Set(done.map(r => r.id));
+    const next = this.state.runs.filter(r => !terminal(r.status) || keep.has(r.id));
+    if (next.length !== this.state.runs.length) { this.state.runs = next; this.dirty = true; }
   }
   private config(j: Job, r: Run): RunnerConfig {
     const s = this.state.settings;
@@ -89,12 +106,14 @@ export class BackupService {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      this.flush();
       const now = this.host.now();
+      if (now - this.lastMaintenance >= 86400_000) { this.trim(); this.lastMaintenance = now; }
       for (const j of this.state.jobs.filter(j => j.enabled)) {
         const slot = validate.latestSlot(j.schedule, now);
         const active = this.state.runs.find(r => r.jobId === j.id && !terminal(r.status));
-        if (slot > j.cursor && !active) { this.enqueue(j.id, 'backup', slot); j.cursor = slot; }
-        else if (slot > j.cursor && active?.status === 'queued' && active.scheduledAt !== undefined) { active.scheduledAt = slot; j.cursor = slot; }
+        if (slot > j.cursor && !active) { j.cursor = slot; this.enqueue(j.id, 'backup', slot); }
+        else if (slot > j.cursor && active?.status === 'queued' && active.scheduledAt !== undefined) { active.scheduledAt = slot; j.cursor = slot; this.dirty = true; }
       }
       for (const r of this.state.runs.filter(r => !terminal(r.status) && r.status !== 'queued')) await this.reconcile(r);
       let count = this.state.runs.filter(r => !terminal(r.status) && r.status !== 'queued').length;
@@ -115,7 +134,7 @@ export class BackupService {
         const nodes = await this.nodes();
         if (nodes.some(n => n.uuid === r.nodeId && n.online)) { try { await this.recover(r.id); } catch { /* 离线和暂时无法核对时继续等待。 */ } }
       }
-      this.persist();
+      this.flush();
       for (const r of this.state.runs.filter(r => terminal(r.status) && r.notify && !r.notified)) await this.notify(r);
     } finally { this.ticking = false; }
   }
@@ -131,6 +150,7 @@ export class BackupService {
     } catch (e) {
       // RPC 出错可能发生在命令已送达之后，必须核对，不能直接重新派发。
       r.status = 'pending'; r.stage = '派发结果待确认'; r.error = this.redact(e instanceof Error ? e.message : e);
+      limitDiagnostics(r);
     }
     this.persist();
   }
@@ -158,13 +178,18 @@ export class BackupService {
   }
   report(report: Report, token: string) {
     const r = this.authorize(report.runId, token, true);
-    if (terminal(r.status)) return this.publicRun(r);
+    if (terminal(r.status)) { this.flush(); return this.publicRun(r); }
     if (!['running', 'success', 'warning', 'failed'].includes(report.status)) throw new Error('执行状态不正确');
     if (typeof report.stage !== 'string' || report.stage.length > 4096 || (report.bytes !== undefined && (!Number.isSafeInteger(report.bytes) || report.bytes < 0)) ||
       (report.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(report.sha256)) || (report.warnings !== undefined && (!Array.isArray(report.warnings) || report.warnings.some(x => typeof x !== 'string')))) throw new Error('执行结果格式不正确');
     if (terminal(report.status)) this.finish(r, report);
-    else { r.status = 'running'; r.stage = this.redact(report.stage); r.updatedAt = this.iso(); }
-    this.persist(); return this.publicRun(r);
+    else {
+      const stage = this.redact(report.stage);
+      if (r.status !== 'running' || r.stage !== stage) { r.status = 'running'; r.stage = stage; this.dirty = true; }
+      // 心跳时间只在内存更新；重启时统一进入结果核对，不依赖心跳落盘。
+      r.updatedAt = this.iso();
+    }
+    this.flush(); return this.publicRun(r);
   }
   private finish(r: Run, data: Report) {
     r.status = data.status; r.stage = this.redact(data.stage); r.updatedAt = this.iso(); r.finishedAt = this.iso();
@@ -173,6 +198,7 @@ export class BackupService {
     const j = this.state.jobs.find(j => j.id === r.jobId);
     if (j && r.config && ['success', 'warning'].includes(r.status) && JSON.stringify(r.config) === JSON.stringify(this.config(j, r))) j.lastTestAt = this.iso();
     delete r.config; delete r.startupHash; delete r.recoveryHash;
+    limitDiagnostics(r); this.dirty = true; this.trim(); this.flush();
   }
   private async reconcile(r: Run) {
     if (r.taskId) {
@@ -183,14 +209,14 @@ export class BackupService {
           if (line) {
             const report = JSON.parse(line.slice('KWB_RESULT:'.length));
             if (report.runId === r.id && terminal(report.status)) { this.finish(r, report); return; }
-            if (report.runId === r.id && report.status === 'running') { r.status = 'running'; r.stage = this.redact(report.stage); r.updatedAt = this.iso(); delete r.taskId; return; }
+            if (report.runId === r.id && report.status === 'running') { r.status = 'running'; r.stage = this.redact(report.stage); r.updatedAt = this.iso(); delete r.taskId; this.dirty = true; return; }
           }
           if (result.exit_code !== 0 && !r.claimed) { this.finish(r, { runId: r.id, status: 'failed', stage: '执行器未启动', error: this.redact(raw) || '请检查节点远程控制、下载工具及目录权限' }); return; }
-          r.status = 'pending'; r.stage = '等待核对节点执行结果';
+          if (r.status !== 'pending' || r.stage !== '等待核对节点执行结果') { r.status = 'pending'; r.stage = '等待核对节点执行结果'; this.dirty = true; }
         }
       } catch { /* 查询失败不代表远端备份失败。 */ }
     }
-    if (this.host.now() - Date.parse(r.updatedAt) > 5 * 60_000) { r.status = 'pending'; r.stage = '等待核对节点执行结果'; }
+    if (this.host.now() - Date.parse(r.updatedAt) > 5 * 60_000 && (r.status !== 'pending' || r.stage !== '等待核对节点执行结果')) { r.status = 'pending'; r.stage = '等待核对节点执行结果'; this.dirty = true; }
   }
   async recover(runId: string) {
     const r = this.state.runs.find(r => r.id === runId);
@@ -211,8 +237,7 @@ export class BackupService {
     try {
       await this.host.call('admin:sendNotification', { event: { event: r.mode === 'test' ? '备份连接测试' : 'WebDAV 备份', clients: [{ uuid: r.nodeId }],
         message: `${r.jobName}：${r.status === 'success' ? '完成' : r.status === 'warning' ? '完成，有警告' : '失败'}\n${r.error || r.remotePath || r.stage}${r.warnings.length ? '\n' + r.warnings.join('\n') : ''}`, time: r.finishedAt } });
-    } catch (e) { r.notificationError = this.redact(e instanceof Error ? e.message : e); }
-    this.persist();
+    } catch (e) { r.notificationError = this.redact(e instanceof Error ? e.message : e); limitDiagnostics(r); this.persist(); }
   }
 }
 export { defaults };

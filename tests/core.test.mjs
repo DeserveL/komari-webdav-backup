@@ -101,3 +101,49 @@ test('运行期间修改来源后，旧备份成功不能批准新配置',async(
   const token=command.match(/Authorization: Bearer (grant-\d+)/)[1],cfg=f.service.claim(r.id,token);
   const updated=(await f.service.saveJobs([{...j,sources:['/new/source']}]))[0];f.service.report({runId:r.id,status:'success',stage:'done',warnings:[]},cfg.reportToken);assert.equal(updated.lastTestAt,undefined);
 });
+
+test('空闲调度、读取、重复心跳不保存；阶段变化与终态及时保存',async()=>{
+  const f=fixture();let saves=0;f.host.save=()=>saves++;
+  for(let i=0;i<8;i++){f.advance(15000);await f.service.tick();f.service.view();}
+  assert.equal(saves,0);
+  const j=await f.makeJob(),r=f.service.enqueue(j.id);await f.service.tick();
+  const grant=f.calls.find(c=>c.method==='admin:exec').params.command.match(/Authorization: Bearer (grant-\d+)/)[1];
+  const cfg=f.service.claim(r.id,grant);const before=saves;
+  for(let i=0;i<24;i++){f.advance(15000);f.service.report({runId:r.id,status:'running',stage:'检查备份来源'},cfg.reportToken);await f.service.tick();}
+  assert.equal(saves,before);assert.equal(r.status,'running');
+  f.service.report({runId:r.id,status:'running',stage:'正在上传'},cfg.reportToken);assert.equal(saves,before+1);
+  f.service.report({runId:r.id,status:'success',stage:'完成',warnings:[]},cfg.reportToken);assert.equal(saves,before+2);
+});
+
+test('保存失败保持待保存状态，后续空闲调度重试且不反复写盘',async()=>{
+  const f=fixture();let saves=0;f.host.save=()=>{saves++;if(saves===1)throw Error('disk unavailable');};
+  assert.throws(()=>f.service.saveSettings({...f.state.settings,baseDir:'changed'}),/disk unavailable/);
+  await f.service.tick();assert.equal(saves,2);await f.service.tick();assert.equal(saves,2);
+  f.service.saveSettings({...f.state.settings});assert.equal(saves,2);
+});
+
+test('历史按完成时间保留30天和500条，保护所有非终态且重复维护不保存',async()=>{
+  const f=fixture(),now=f.host.now(),iso=age=>new Date(now-age).toISOString();
+  f.online['node-a'].online=false;
+  const run=(id,status,age)=>({id,jobId:'removed',nodeId:'node-a',jobName:'test',mode:'backup',status,stage:'done',createdAt:iso(age),updatedAt:iso(age),finishedAt:iso(age),warnings:[]});
+  f.state.runs=Array.from({length:505},(_,i)=>run('recent-'+i,'success',i*1000));
+  f.state.runs.push(run('expired','failed',31*86400000),run('boundary','success',30*86400000),run('queued','queued',90*86400000),run('pending','pending',90*86400000));
+  f.state.runs.find(r=>r.id==='pending').stage='等待核对节点执行结果';
+  let saves=0;f.host.save=()=>saves++;
+  const restored=new BackupService(f.state,f.host);assert.equal(restored.state.runs.length,502);assert.equal(saves,1);
+  assert.ok(restored.state.runs.some(r=>r.id==='queued'));assert.ok(restored.state.runs.some(r=>r.id==='pending'));
+  assert.ok(!restored.state.runs.some(r=>r.id==='recent-504'));assert.ok(!restored.state.runs.some(r=>r.id==='expired'));
+  await restored.tick();assert.equal(saves,1);
+  f.advance(31*86400000);await restored.tick();assert.equal(restored.state.runs.length,2);assert.equal(saves,2);
+  await restored.tick();assert.equal(saves,2);
+});
+
+test('30天整的历史保留，超期在加载时裁剪；长诊断总计不超过16KiB',()=>{
+  const f=fixture(),now=f.host.now();
+  const run=(id,age)=>({id,jobId:'job',nodeId:'node-a',jobName:'test',mode:'backup',status:'failed',stage:'done',createdAt:new Date(now-age).toISOString(),updatedAt:new Date(now-age).toISOString(),finishedAt:new Date(now-age).toISOString(),warnings:Array(100).fill('中文错误'.repeat(2000)),error:'失败'.repeat(2000),notificationError:'通知失败'.repeat(2000)});
+  f.state.runs=[run('boundary',30*86400000),run('old',30*86400000+1)];
+  const restored=new BackupService(f.state,f.host);assert.equal(restored.state.runs.length,1);
+  const r=restored.state.runs[0],text=[r.error,r.notificationError,...r.warnings].filter(Boolean).join('');
+  assert.ok(Buffer.byteLength(text)<=16384);assert.match(text,/已截断/);assert.ok(!text.includes('\ufffd'));
+  let saves=0;f.host.save=()=>saves++;new BackupService(restored.state,f.host);assert.equal(saves,0);
+});

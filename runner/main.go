@@ -33,8 +33,13 @@ func privateDir(dir string) error {
 }
 
 func saveReport(dir string, r Report) error {
+	r = boundReport(r)
 	r.PID = os.Getpid()
 	r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return writeReport(dir, r)
+}
+
+func writeReport(dir string, r Report) error {
 	data, err := json.Marshal(r)
 	if err != nil {
 		return err
@@ -105,6 +110,7 @@ func claim(ctx context.Context, endpoint, runID, grant string, allowLoopback boo
 }
 
 func postReport(c Config, r Report) {
+	r = boundReport(r)
 	data, _ := json.Marshal(r)
 	for attempt := 0; attempt < 2; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -130,7 +136,7 @@ func postReport(c Config, r Report) {
 	}
 }
 
-func output(r Report) { b, _ := json.Marshal(r); fmt.Println("KWB_RESULT:" + string(b)) }
+func output(r Report) { b, _ := json.Marshal(boundReport(r)); fmt.Println("KWB_RESULT:" + string(b)) }
 
 func main() { os.Exit(mainCommand(os.Args[1:])) }
 func mainCommand(args []string) int {
@@ -180,6 +186,30 @@ func mainCommand(args []string) int {
 	if args[0] != "run" {
 		return 2
 	}
+	// 生命周期锁先于运行锁；维护期间不能启动或清理另一个备份的文件。
+	unlockNode, err := acquireLock(filepath.Join(base, "node.lock"))
+	if err != nil {
+		// 同一命令重复到达时返回已有状态，不能把正在执行的备份误报为失败。
+		if data, e := os.ReadFile(resultPath); e == nil {
+			var existing Report
+			if json.Unmarshal(data, &existing) == nil && existing.RunID == *runID {
+				output(existing)
+				return 0
+			}
+		}
+		lockFile := filepath.Join(base, "results", *runID+".lock")
+		if info, e := os.Lstat(lockFile); e == nil && info.Mode().IsRegular() {
+			if release, e := acquireLock(lockFile); errors.Is(e, errAlreadyRunning) {
+				output(Report{RunID: *runID, Status: "running", Stage: "相同任务已在执行中", Warnings: []string{}})
+				return 0
+			} else if e == nil {
+				release()
+			}
+		}
+		output(Report{RunID: *runID, Status: "failed", Stage: "检查节点运行锁", Error: err.Error(), Warnings: []string{}})
+		return 1
+	}
+	defer unlockNode()
 	// 在领取一次性配置前加运行锁，防止重复投递覆盖正在执行的结果。
 	unlockRun, lockErr := acquireLock(filepath.Join(base, "results", *runID+".lock"))
 	if lockErr != nil {
@@ -202,10 +232,13 @@ func mainCommand(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	executable, _ := os.Executable()
+	maintenanceWarnings := maintainLocal(base, *runID, executable, time.Now())
 	c, err := claim(ctx, *endpoint, *runID, *grant, *allowLoopback)
 	if err != nil {
-		r := Report{RunID: *runID, Status: "failed", Stage: "获取任务配置", Error: err.Error(), Warnings: []string{}}
+		r := Report{RunID: *runID, Status: "failed", Stage: "获取任务配置", Error: err.Error(), Warnings: maintenanceWarnings}
 		_ = saveReport(base, r)
+		_ = maintainLocal(base, *runID, executable, time.Now())
 		output(r)
 		return 1
 	}
@@ -239,13 +272,28 @@ func mainCommand(args []string) int {
 			}
 		}
 	}()
-	r := execute(ctx, c, base, emit)
+	r := executeLocked(ctx, c, base, emit)
+	r.Warnings = append(r.Warnings, maintenanceWarnings...)
+	if r.Status == "success" && len(r.Warnings) > 0 {
+		r.Status = "warning"
+		r.Stage = "备份完成，有警告"
+	}
+	r = boundReport(r)
 	close(done)
 	<-workerDone
 	if err = saveReport(base, r); err != nil {
 		r.Status = "failed"
 		r.Stage = "保存本地执行结果"
 		r.Error = err.Error()
+	}
+	if warnings := maintainLocal(base, c.RunID, executable, time.Now()); len(warnings) > 0 {
+		r.Warnings = append(r.Warnings, warnings...)
+		if r.Status == "success" {
+			r.Status = "warning"
+			r.Stage = "备份完成，有警告"
+		}
+		r = boundReport(r)
+		_ = saveReport(base, r)
 	}
 	postReport(c, r)
 	output(r)

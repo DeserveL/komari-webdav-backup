@@ -1,5 +1,18 @@
 # 验证记录
 
+## 0.1.2 轻量优化
+
+日期：2026-10-27。环境：中文 Windows，Node.js 24.19.0、Go 1.27.3，官方 Komari 1.6.1 / MoeJS 隔离实例。
+
+- TypeScript 严格检查和 24 项插件测试通过，覆盖空闲与重复心跳不保存、阶段和终态保存、保存失败重试、历史数量与年龄边界、非终态保护和 UTF-8 诊断限制。
+- Go 测试和 `go vet` 通过；模拟 WebDAV 实际执行文件及目录删除，检查未知文件保护、删除后再次列举、异常 XML、跨任务隔离、202 / 207 / 403 处理和失败后重试。
+- 节点维护测试覆盖 30 天、500 条、孤立锁、当前记录保护、执行器缓存和重复维护；Linux CI 另执行真实 flock 保护与竞态检测。
+- 本地官方 Komari 19 项检查通过：从 0.1.1 ZIP 覆盖升级，任务、公用凭据、保留期内历史、密钥和暂停状态保留；新版本实际路由验证重复心跳不写盘及中文诊断截断。
+- 在升级后的官方实例中连续观察至少 90 秒，跨过至少六次真实调度，并持续读取管理状态；`state.enc.json` 的字节内容、修改时间和 inode 均不变。
+- 插件仍按需启动执行器，不新增常驻服务、存储依赖或配置项；API、执行器协议、加密状态及归档格式保持兼容。
+
+本轮不连接生产节点或生产 WebDAV，不修改线上插件和任务。真实 WebDAV 的目录删除兼容性、生产恢复验收、性能峰值及 arm64 硬件运行仍需实际部署验证。Linux 结果以本次提交的 [CI](https://github.com/DeserveL/komari-webdav-backup/actions/workflows/ci.yml) 和 [Release](https://github.com/DeserveL/komari-webdav-backup/actions/workflows/release.yml) 为准，不将本地 Windows 测试当作 Linux 验收。
+
 ## GitHub 开源发布验证
 
 日期：2026-10-27。版本：0.1.1。

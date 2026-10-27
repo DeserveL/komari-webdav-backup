@@ -25,6 +25,7 @@ func acquireLock(name string) (func(), error) {
 func processAlive(pid int) bool {
 	return pid > 0 && (syscall.Kill(pid, 0) == nil || syscall.Kill(pid, 0) == syscall.EPERM)
 }
+func maintenanceLock(name string) (func(), error) { return acquireLock(name) }
 func checkFreeSpace(dir string, expected int64) error {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err != nil {

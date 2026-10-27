@@ -24,13 +24,15 @@ import (
 )
 
 type mockDAV struct {
-	mu        sync.Mutex
-	files     map[string][]byte
-	dirs      map[string]bool
-	deleted   []string
-	retries   int
-	failPUT   bool
-	wrongSize bool
+	mu                    sync.Mutex
+	files                 map[string][]byte
+	dirs                  map[string]bool
+	deleted               []string
+	retries               int
+	failPUT               bool
+	wrongSize             bool
+	directoryDeleteCode   int
+	injectOnArchiveDelete bool
 }
 
 func fixtureDAV(t *testing.T) (*mockDAV, *httptest.Server) {
@@ -96,10 +98,28 @@ func (d *mockDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(data)
 	case "DELETE":
 		if d.dirs[p] {
-			w.WriteHeader(403)
+			if d.directoryDeleteCode != 0 {
+				w.WriteHeader(d.directoryDeleteCode)
+				return
+			}
+			for file := range d.files {
+				if strings.HasPrefix(file, p+"/") {
+					delete(d.files, file)
+				}
+			}
+			for dir := range d.dirs {
+				if dir == p || strings.HasPrefix(dir, p+"/") {
+					delete(d.dirs, dir)
+				}
+			}
+			d.deleted = append(d.deleted, p)
+			w.WriteHeader(204)
 			return
 		}
 		delete(d.files, p)
+		if d.injectOnArchiveDelete && strings.HasSuffix(p, "/backup.tar.gz") {
+			d.files[path.Join(path.Dir(p), "new-user-file.txt")] = []byte("concurrent content")
+		}
 		d.deleted = append(d.deleted, p)
 		w.WriteHeader(204)
 	case "PROPFIND":
@@ -174,16 +194,23 @@ func TestBackupRoundTripAndRetentionIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := addManifest(t, d, c, "run-old", 10*24*time.Hour, true)
+	cleanOld := addManifest(t, d, c, "run-clean-old", 12*24*time.Hour, true)
 	foreign := addManifest(t, d, c, "run-foreign", 20*24*time.Hour, false)
 	recent := addManifest(t, d, c, "run-recent", time.Hour, true)
 	d.files["/"+path.Join(c.RemoteDir, "unrelated.tar.gz")] = []byte("leave alone")
 	d.files[path.Join(old, "notes.txt")] = []byte("not owned")
 	r := execute(context.Background(), c, state, func(Report) {})
-	if r.Status != "success" {
+	if r.Status != "warning" {
 		t.Fatalf("%+v", r)
 	}
-	if _, ok := d.files[path.Join(old, "backup.tar.gz")]; ok {
+	if _, ok := d.files[path.Join(cleanOld, "backup.tar.gz")]; ok {
 		t.Fatal("expired owned backup was not removed")
+	}
+	if d.dirs[cleanOld] {
+		t.Fatal("expired run directory was not removed")
+	}
+	if _, ok := d.files[path.Join(old, "backup.tar.gz")]; !ok {
+		t.Fatal("directory with unknown content modified")
 	}
 	for _, file := range []string{path.Join(old, "notes.txt"), path.Join(foreign, "backup.tar.gz"), path.Join(recent, "backup.tar.gz"), "/" + path.Join(c.RemoteDir, "unrelated.tar.gz")} {
 		if _, ok := d.files[file]; !ok {

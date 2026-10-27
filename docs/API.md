@@ -19,7 +19,7 @@
 
 `JobInput`：`name, nodeId, sources: string[], excludes: string[], remoteDir, schedule: {kind: "daily" | "weekly", time: "HH:mm", weekday: 0..6}, retentionDays, notify, enabled`。
 
-执行状态：`queued → dispatching → running → success | warning | failed`。派发或回传不明确时进入 `pending`；通过状态核对进入运行中或终态。待确认状态占用该节点及并发槽，不允许重复执行。历史保存最近 500 个终态记录，前端展示最近 200 条；在途记录始终保留。
+执行状态：`queued → dispatching → running → success | warning | failed`。派发或回传不明确时进入 `pending`；通过状态核对进入运行中或终态。待确认状态占用该节点及并发槽，不允许重复执行。终态历史保留 30 天、最多 500 条，前端展示最近 200 条；在途记录始终保留。错误、警告和通知错误合计限制为 16 KiB UTF-8 文本，超出部分标注截断。
 
 ## 执行器接口
 
@@ -33,8 +33,10 @@
 
 运行进度每 15 秒回报。终态同时写入节点本地 `results/<runId>.json` 并以单行 `KWB_RESULT:<JSON>` 输出供 Komari 任务结果核对。文件不保存 WebDAV 或回报授权。
 
+相同阶段的运行心跳只刷新面板内存时间，不触发状态文件写入；阶段变化及终态及时持久化。接口及协议版本保持为 `1`。
+
 ## 远端完成清单
 
-`manifest.json` 包含 `owner: "komari-webdav-backup/v1"`、`version: 1`、`nodeId`、`jobId`、`runId`、`completedAt`、`archive: "backup.tar.gz"`、`size`、`sha256`、`sources`、`warnings`。清理同时验证所有权和三层 ID，只删除该目录下的 `backup.tar.gz` 与 `manifest.json`，不递归删除目录。
+`manifest.json` 包含 `owner: "komari-webdav-backup/v1"`、`version: 1`、`nodeId`、`jobId`、`runId`、`completedAt`、`archive: "backup.tar.gz"`、`size`、`sha256`、`sources`、`warnings`。清理同时验证所有权和三层 ID，并严格检查运行目录仅含已知文件；先删除过期归档，再删除仅剩清单的运行目录，最后确认目录不存在。未知内容或不完整列举导致清理警告，不执行集合删除。
 
 清单 SHA-256 用于下载后校验。普通 WebDAV HEAD 只能核对大小，不代表服务端已经重新计算摘要；严格完整性需要下载归档核对。

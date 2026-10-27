@@ -14,6 +14,15 @@ import (
 )
 
 func execute(ctx context.Context, c Config, stateDir string, emit func(Report)) Report {
+	unlock, err := acquireLock(filepath.Join(stateDir, "node.lock"))
+	if err != nil {
+		return Report{RunID: c.RunID, Status: "failed", Stage: "检查节点运行锁", Error: err.Error(), Warnings: []string{}}
+	}
+	defer unlock()
+	return executeLocked(ctx, c, stateDir, emit)
+}
+
+func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Report)) Report {
 	r := Report{RunID: c.RunID, Status: "running", Stage: "检查备份来源", Warnings: []string{}}
 	var d *DAV
 	incompleteDir := ""
@@ -36,11 +45,6 @@ func execute(ctx context.Context, c Config, stateDir string, emit func(Report)) 
 		return fail(err)
 	}
 	emit(r)
-	unlock, err := acquireLock(filepath.Join(stateDir, "node.lock"))
-	if err != nil {
-		return fail(err)
-	}
-	defer unlock()
 	workRoot := filepath.Join(stateDir, "work")
 	if err = os.MkdirAll(workRoot, 0700); err != nil {
 		return fail(err)
@@ -167,6 +171,7 @@ func execute(ctx context.Context, c Config, stateDir string, emit func(Report)) 
 	if err != nil {
 		return fail(err)
 	}
+	r = boundReport(r)
 	r.Stage = "正在上传"
 	emit(r)
 	runDir := path.Join(c.RemoteDir, c.RunID)

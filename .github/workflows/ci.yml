@@ -27,7 +27,8 @@ jobs:
         run: |
           curl --fail --location https://github.com/komari-monitor/komari/releases/download/1.6.1/komari-linux-amd64 -o "$RUNNER_TEMP/komari"
           chmod +x "$RUNNER_TEMP/komari"
-          KOMARI_EXE="$RUNNER_TEMP/komari" node scripts/smoke-komari.mjs
+          curl --fail --location https://github.com/DeserveL/komari-webdav-backup/releases/download/v0.1.1/komari-webdav-backup-0.1.1.zip -o "$RUNNER_TEMP/previous.zip"
+          KOMARI_EXE="$RUNNER_TEMP/komari" KOMARI_PREVIOUS_PACKAGE="$RUNNER_TEMP/previous.zip" node scripts/smoke-komari.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: komari-webdav-backup

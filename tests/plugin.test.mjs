@@ -55,3 +55,12 @@ test('MoeJS Buffer.concat 异常时加密状态仍能正确重载',async t=>{
   const broken=new Proxy(Buffer,{get(target,key){if(key==='concat')return list=>Buffer.alloc(list.reduce((n,b)=>n+b.length,0));return Reflect.get(target,key);}});
   const f=await fixture(t,broken);await f.reload();assert.equal((await f.request('GET','/api/admin/webdav-backup/state')).data.ok,true);
 });
+
+test('无变化的读取、调度和重载保持状态文件内容、mtime与inode不变',async t=>{
+  const f=await fixture(t),file=path.join(f.storage,'state.enc.json');
+  const before=fs.readFileSync(file),stat=fs.statSync(file,{bigint:true});
+  for(let i=0;i<7;i++){for(const tick of f.timers)tick();await new Promise(r=>setImmediate(r));await f.request('GET','/api/admin/webdav-backup/state');}
+  await f.reload();
+  assert.deepEqual(fs.readFileSync(file),before);
+  const after=fs.statSync(file,{bigint:true});assert.equal(after.mtimeNs,stat.mtimeNs);assert.equal(after.ino,stat.ino);
+});
