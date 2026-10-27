@@ -1,0 +1,22 @@
+{
+  "name": "komari-webdav-backup",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Komari 多服务器 WebDAV 文件备份插件",
+  "license": "MIT",
+  "author": "DeserveL",
+  "repository": {"type": "git", "url": "https://github.com/DeserveL/komari-webdav-backup.git"},
+  "homepage": "https://github.com/DeserveL/komari-webdav-backup#readme",
+  "bugs": {"url": "https://github.com/DeserveL/komari-webdav-backup/issues"},
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build:js": "node scripts/build.mjs",
+    "test": "npm run check && npm run build:js && node --test tests/*.test.mjs",
+    "build": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,35 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: false
+      - run: npm ci
+      - run: npm test
+      - run: go test -race -count=1 ./... && go vet ./...
+        working-directory: runner
+      - name: Verify release version
+        run: node -e "if (process.env.GITHUB_REF_NAME !== 'v' + require('./package.json').version) process.exit(1)"
+      - run: npm run build
+      - name: Verify official Komari runtime
+        run: |
+          curl --fail --location https://github.com/komari-monitor/komari/releases/download/1.6.1/komari-linux-amd64 -o "$RUNNER_TEMP/komari"
+          chmod +x "$RUNNER_TEMP/komari"
+          KOMARI_EXE="$RUNNER_TEMP/komari" node scripts/smoke-komari.mjs
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md

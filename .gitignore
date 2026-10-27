@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.build/
+release/
+*.local.json
+*.log
+.env
+coverage/

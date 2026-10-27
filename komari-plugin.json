@@ -1,0 +1,12 @@
+{
+  "name": {"zh_CN": "WebDAV 备份", "en": "WebDAV Backup"},
+  "short": "webdav-backup",
+  "author": "DeserveL",
+  "url": "https://github.com/DeserveL/komari-webdav-backup",
+  "description": {"zh_CN": "集中管理服务器文件备份、定时上传 WebDAV 并接收结果通知", "en": "Scheduled server file backups to WebDAV"},
+  "version": "0.1.1",
+  "entry": "script.js",
+  "komari": ">=1.6.1",
+  "permissions": {"node": true, "allowSystemRPC": true, "allowRoutes": true, "timeout": 30, "maxHTTPBodyBytes": 33554432},
+  "pages": [{"file": "pages/admin.html", "title": {"zh_CN": "WebDAV 备份", "en": "WebDAV Backup"}, "type": "iframe", "visibility": "admin"}]
+}

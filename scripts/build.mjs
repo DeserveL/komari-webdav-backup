@@ -1,0 +1,11 @@
+import { build } from 'esbuild';
+import { mkdir, copyFile } from 'node:fs/promises';
+await mkdir('dist/pages', {recursive:true});
+await mkdir('.build', {recursive:true});
+await build({entryPoints:['src/plugin.ts'], outfile:'dist/script.js', bundle:true, format:'iife', globalName:'KomariBackup', platform:'neutral', target:'es2020', external:['server','fs','path','crypto'], footer:{js:'function load() { return KomariBackup.load(); }\nfunction unload() { return KomariBackup.unload(); }'}});
+await build({entryPoints:['src/core.ts'], outfile:'.build/core.cjs', bundle:true, platform:'node', format:'cjs'});
+await build({entryPoints:['src/validation.ts'], outfile:'.build/validation.cjs', bundle:true, platform:'node', format:'cjs'});
+await build({entryPoints:['src/bootstrap.ts'], outfile:'.build/bootstrap.cjs', bundle:true, platform:'node', format:'cjs'});
+await build({entryPoints:['web/admin.ts'], outfile:'dist/pages/admin.js', bundle:true, platform:'browser', target:'es2020'});
+for (const file of ['admin.html','admin.css']) await copyFile('web/'+file, 'dist/pages/'+file);
+await copyFile('komari-plugin.json', 'dist/komari-plugin.json');
