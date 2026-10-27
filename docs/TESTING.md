@@ -1,5 +1,16 @@
 # 验证记录
 
+## GitHub 开源发布验证
+
+日期：2026-10-27。版本：0.1.1。
+
+- [Linux CI](https://github.com/DeserveL/komari-webdav-backup/actions/runs/40433493585) 已通过：TypeScript 严格检查、19 项插件测试、`go test -race -count=1 ./...`、`go vet ./...`、Linux amd64 / arm64 打包，以及官方 Komari 1.6.1 运行时检查。
+- 本地真实 Komari 的 17 项检查通过，包含旧版 0.1.0 ZIP 覆盖升级；GitHub Linux 流程同时检查当前版本重新安装。
+- 发布源码仅包含项目文件和示例截图，排除构建缓存、运行配置与密钥；提交使用 GitHub noreply 邮箱。
+- 真实环境的下载恢复、长期断网、arm64 硬件运行及更多 WebDAV 服务仍需部署验收。CI 和模拟服务检查不替代这些验收。
+
+后续提交和版本发布以 [Actions](https://github.com/DeserveL/komari-webdav-backup/actions) 与 [Releases](https://github.com/DeserveL/komari-webdav-backup/releases) 中的结果为准。
+
 ## 0.1.1 布局修复与覆盖安装
 
 日期：2026-10-26。构建环境沿用下方首版环境。本次只修复详情网格和版本展示，执行器、API 数据结构、状态格式及远端目录规则保持一致。
@@ -67,6 +78,8 @@ Go 自动测试使用本机模拟 WebDAV 服务，实际执行了归档、上传
 虚拟 Agent 只验证协议，不执行 Linux 引导命令。通知检查没有开启外部通道，未向 Telegram、邮箱或其他第三方发送消息。
 
 ## 首版尚未验证的范围
+
+以下保留 0.1.0 阶段的验证边界；当前 Linux CI 情况见本页顶部。
 
 - Linux Agent 的系统性故障验收，包括文件权限、`flock`、空间检查、进程中断及恢复；单次真实备份成功记录补充于上方 0.1.1 验证。
 - Linux 符号链接用例和竞态检测；GitHub Actions 已配置 Linux 测试，但本地未运行该工作流。
