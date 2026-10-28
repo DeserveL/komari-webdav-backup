@@ -1,6 +1,7 @@
 import { API, RUNNER_API, defaults, State } from './types';
 import { BackupService } from './core';
 import { Binaries } from './bootstrap';
+import { upgradeLayout } from './layout';
 
 declare const __storageDir__: string;
 const fs = require('fs') as typeof import('fs');
@@ -54,7 +55,7 @@ function storage() {
       decipher.setAuthTag(Buffer.from(data.tag, 'hex'));
       // MoeJS 1.6.1 的 Buffer.concat 会损坏字节，使用加密接口的编码输出。
       const state: State = JSON.parse(decipher.update(data.data, 'hex', 'utf8') + decipher.final('utf8'));
-      if (state.version !== 1 || !Array.isArray(state.jobs) || !Array.isArray(state.runs)) throw new Error('备份配置版本不支持');
+      if (![1,2].includes(state.version) || !Array.isArray(state.jobs) || !Array.isArray(state.runs)) throw new Error('备份配置版本不支持');
       return state;
     },
     save,
@@ -88,7 +89,12 @@ export async function load() {
   stopped = false;
   const store = storage();
   const binaries: Binaries = JSON.parse(fs.readFileSync(path.join(__dirname, 'runners', 'manifest.json'), 'utf8'));
-  service = new BackupService(store.read(), { now: () => Date.now(), id: () => crypto.randomBytes(16).toString('hex'),
+  const state = store.read();
+  if (state.version === 1) {
+    const raw = await server.call('admin:listClients');
+    if (upgradeLayout(state, Array.isArray(raw) ? raw : Object.values(raw ?? {}))) store.save(state);
+  }
+  service = new BackupService(state, { now: () => Date.now(), id: () => crypto.randomBytes(16).toString('hex'),
     token: () => crypto.randomBytes(32).toString('hex'), hash: value => crypto.createHash('sha256').update(value).digest('hex'),
     save: state => store.save(state), call: (method, params) => server.call(method, params), binaries });
   route('GET', '/state', (_req, res) => json(res, { ok: true, data: service.view() }));

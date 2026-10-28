@@ -36,10 +36,10 @@ export function job(input: Partial<Job>, id: string, now: number, old?: Job): Jo
   if (excludes.length > 128 || excludes.some(x => !x || x.startsWith('/') || x.includes('\\') || x.split('/').includes('..'))) throw new Error('排除规则使用相对归档路径，例如 **/*.log 或 opt/app/cache/**');
   const name = text(input.name, 100), nodeId = text(input.nodeId, 100);
   if (!name || !/^[A-Za-z0-9_-]+$/.test(nodeId)) throw new Error('请填写任务名称并选择服务器');
-  const changed = !!old && JSON.stringify([sources, excludes, input.remoteDir, nodeId]) !== JSON.stringify([old.sources, old.excludes, old.remoteDir, old.nodeId]);
+  const changed = !!old && JSON.stringify([sources, excludes, nodeId]) !== JSON.stringify([old.sources, old.excludes, old.nodeId]);
   const lastTestAt = changed ? undefined : old?.lastTestAt;
   if (input.enabled && !lastTestAt) throw new Error('请先完成一次节点连接测试或手动备份，再启用定时任务');
-  return { id, name, nodeId, sources: [...new Set(sources)], excludes, remoteDir: relativeDir(input.remoteDir ?? ''),
+  return { id, name, nodeId, sources: [...new Set(sources)], excludes, taskDir: old?.taskDir || '',
     schedule: schedule(input.schedule!), retentionDays: integer(input.retentionDays ?? 7, 0, 36500, '保留天数'),
     notify: input.notify === true, enabled: input.enabled === true, createdAt: old?.createdAt ?? new Date(now).toISOString(),
     cursor: old?.enabled && input.enabled ? old.cursor : now, lastTestAt };

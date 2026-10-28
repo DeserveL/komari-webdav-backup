@@ -1,42 +1,38 @@
 # 插件接口与数据
 
-版本 `1`。所有 JSON 文本使用 UTF-8。管理接口返回 `{ "ok": true, "data": ... }`，失败为 `{ "ok": false, "error": "..." }`。管理接口要求 Komari 管理员身份；修改接口拒绝跨站浏览器请求。
+管理接口位于 `/api/admin/webdav-backup`，要求管理员身份；修改请求检查浏览器来源。JSON 使用 UTF-8，返回 `{ok:true,data:...}` 或 `{ok:false,error:...}`。
 
-## 管理接口
-
-基础路径：`/api/admin/webdav-backup`。
-
-| 方法 | 路径 | 请求 / 结果 |
+| 方法 | 路径 | 内容 |
 | --- | --- | --- |
-| GET | `/state` | 公用设置（密码脱敏）、任务、最近 200 条记录、面板时间和时区偏移 |
-| GET | `/nodes` | 节点 UUID、名称、在线状态和可用的环境信息；不返回 Agent token |
+| GET | `/state` | 脱敏设置、任务、最近 200 条记录、面板时间和时区 |
+| GET | `/nodes` | 节点 UUID、名称、在线状态；不含 Agent token |
 | POST | `/settings` | `panelUrl, webdavUrl, username, password, baseDir, concurrency, timeoutMinutes`；空密码保留原值 |
-| POST | `/test-storage` | 空对象；检查面板到 WebDAV 的读写、列举和删除 |
-| POST | `/jobs` | `{jobs: JobInput[]}`；批量保存，更新时带 `id` |
-| POST | `/delete-job` | `{id}`；不删除远端数据 |
-| POST | `/run` | `{jobId, mode?: "backup" | "test"}`；相同任务在途时返回原记录 |
-| POST | `/recover` | `{runId}`；下发只读状态核对命令 |
+| POST | `/test-storage` | 面板到 WebDAV 的读写、大小、列举和文件删除检查 |
+| POST | `/jobs` | `{jobs: JobInput[]}`，多节点分别创建独立任务 |
+| POST | `/delete-job` | `{id}`，不删除远端文件 |
+| POST | `/run` | `{jobId,mode?:"backup"|"test"}`，在途请求合并 |
+| POST | `/recover` | `{runId}`，只核对节点结果 |
 
-`JobInput`：`name, nodeId, sources: string[], excludes: string[], remoteDir, schedule: {kind: "daily" | "weekly", time: "HH:mm", weekday: 0..6}, retentionDays, notify, enabled`。
+`JobInput`：`name,nodeId,sources,excludes,schedule:{kind,time,weekday},retentionDays,notify,enabled`；更新携带 `id`。不再提供用户指定的 `remoteDir`。后端生成并持久化 `taskDir`；`GET /state` 为每个任务附带相对 WebDAV 地址的只读 `savePath`。客户端指定的目录字段不会改变实际目录。
 
-执行状态：`queued → dispatching → running → success | warning | failed`。派发或回传不明确时进入 `pending`；通过状态核对进入运行中或终态。待确认状态占用该节点及并发槽，不允许重复执行。终态历史保留 30 天、最多 500 条，前端展示最近 200 条；在途记录始终保留。错误、警告和通知错误合计限制为 16 KiB UTF-8 文本，超出部分标注截断。
+执行状态包括 `queued,dispatching,running,pending,success,warning,failed`。在途与待确认记录保留；终态保留 30 天、最多 500 条。诊断文本合计最多 16 KiB，超出标注截断。相同阶段的心跳只更新内存联系时间，关键变化及时保存。
 
-## 执行器接口
+## 执行器协议 2
 
-基础路径：`/api/clients/webdav-backup`。这些路由不依赖浏览器登录，必须携带各自授权头。选择此路径是为了兼容 Komari 私有站点模式；不会继承其他客户端接口的角色权限。
+节点路径为 `/api/clients/webdav-backup`，须使用独立受限授权：
 
-- `GET /binary?run=<ID>&arch=amd64|arm64`：`Authorization: Bearer <startup-or-recovery-grant>`；返回附带执行器。引导命令另外核对构建摘要。
-- `POST /claim`：`Authorization: Bearer <startup-grant>`，正文 `{runId}`；返回原始执行器配置，包含本次凭据和独立 `reportToken`。5 分钟内只能领取一次。
-- `POST /report`：`Authorization: Bearer <reportToken>`，正文 `{runId,status,stage,bytes?,sha256?,remotePath?,warnings?,error?}`；只可更新其对应运行。回报授权有效期为任务超时加 7 天，终态回报幂等。
+- `GET /binary?run=<ID>&arch=amd64|arm64`：启动或核对下载授权；另外校验执行器 SHA-256。
+- `POST /claim`：启动授权，正文 `{runId}`，5 分钟内只能领取一次。返回 `protocol:2`、完整运行/任务/节点 ID、来源和排除、任务目录 `remoteDir`、文件前缀 `filePrefix`、保留天数、超时、WebDAV 凭据及 `reportUrl,reportToken`。
+- `POST /report`：回报授权，正文 `{runId,status,stage,bytes?,sha256?,remotePath?,manifestPath?,warnings?,error?}`。终态幂等，回报授权不能领取配置。
 
-`reportToken` 与状态核对下载授权不能领取 WebDAV 密码。授权只在特定运行和过期时间内有效，不具备 Komari 管理员权限。
+`filePrefix` 来自面板派发时间，格式为 `YYYYMMDD_HHmmss±HHmm_<运行短编号>`。节点短名冲突时使用完整运行 ID。回报中的 `remotePath`、`manifestPath` 为实际文件地址，包括回退后的文件名。进度每 15 秒回报，本地结果不含凭据，并以 `KWB_RESULT:<JSON>` 输出供宿主核对。
 
-运行进度每 15 秒回报。终态同时写入节点本地 `results/<runId>.json` 并以单行 `KWB_RESULT:<JSON>` 输出供 Komari 任务结果核对。文件不保存 WebDAV 或回报授权。
+## 远端文件与清单 2
 
-相同阶段的运行心跳只刷新面板内存时间，不触发状态文件写入；阶段变化及终态及时持久化。接口及协议版本保持为 `1`。
+每个任务只有一个目录，每次运行保存 `<prefix>.tar.gz` 和 `<prefix>.manifest.json`，不创建运行目录。
 
-## 远端完成清单
+清单字段为 `owner:"komari-webdav-backup/v2",version:2,nodeId,jobId,runId,completedAt,archive,size,sha256,sources,warnings`。完整 ID 用于归属验证，`archive` 必须是与清单前缀匹配的安全文件名。保留清理以 `completedAt` 为准，不通过解析文件名时间判断是否过期；只删除确认归属的文件对，不删除集合、未知文件或旧版备份。
 
-`manifest.json` 包含 `owner: "komari-webdav-backup/v1"`、`version: 1`、`nodeId`、`jobId`、`runId`、`completedAt`、`archive: "backup.tar.gz"`、`size`、`sha256`、`sources`、`warnings`。清理同时验证所有权和三层 ID，并严格检查运行目录仅含已知文件；先删除过期归档，再删除仅剩清单的运行目录，最后确认目录不存在。未知内容或不完整列举导致清理警告，不执行集合删除。
+状态内部版本升为 2，可从版本 1 升级本地任务信息并暂停旧任务；不兼容扫描旧版远端归档。旧运行历史链接及结果核对保留。
 
-清单 SHA-256 用于下载后校验。普通 WebDAV HEAD 只能核对大小，不代表服务端已经重新计算摘要；严格完整性需要下载归档核对。
+HEAD 只校验远端大小；归档恢复仍须下载并核对 SHA-256、解压和检查文件内容。

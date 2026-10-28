@@ -80,24 +80,28 @@ try{
   r=await request(plugin+'/state');assert.equal(r.data.data.runs[0].status,'success');assert.ok(!JSON.stringify(r.data).includes('Local-Secret'));checks.push('real runtime accepts scoped completion and redacts secrets');
   const agentResult=await fetch(base+'/api/clients/v2/rpc?token='+encodeURIComponent(a.token),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',method:'agent.taskResult',params:{task_id:exec.params.task_id,result:'KWB_RESULT:'+JSON.stringify(result),exit_code:0,finished_at:new Date().toISOString()},id:'task-result'})});assert.equal(agentResult.status,200);
   await rpc('admin:sendNotification',{event:{event:'备份协议检查',message:'本机隔离测试，未启用外部通知通道',clients:[{uuid:a.uuid}]}});checks.push('real task-result and notification RPC signatures');
+  const approvedJob=(await request(plugin+'/state')).data.data.jobs.find(j=>j.id===jobs[0].id);
+  r=await request(plugin+'/jobs',{jobs:[{...approvedJob,enabled:true}]});assert.equal(r.status,200);
   const before=(await request(plugin+'/state')).data.data;
+  assert.equal(before.jobs.find(j=>j.id===jobs[0].id).enabled,true);
   const keyBefore=await readFile(join(dir,'master.key'));
   const version=JSON.parse(await readFile('package.json','utf8')).version;
   await installPackage('release/komari-webdav-backup-'+version+'.zip');
   const after=(await request(plugin+'/state')).data.data;
-  assert.equal(after.version,version);assert.deepEqual(after.jobs,before.jobs);assert.deepEqual(after.runs,before.runs);assert.deepEqual(after.settings,before.settings);
+  assert.equal(after.version,version);assert.deepEqual(after.runs,before.runs);assert.deepEqual(after.settings,before.settings);
+  for (const old of before.jobs) { const next=after.jobs.find(j=>j.id===old.id); for(const key of ['name','nodeId','sources','excludes','schedule','retentionDays','notify'])assert.deepEqual(next[key],old[key]); assert.equal(next.enabled,false); assert.equal(next.lastTestAt,undefined); assert.ok(next.taskDir); assert.ok(!('remoteDir' in next)); assert.equal(next.savePath,after.settings.baseDir+'/'+next.taskDir); }
   assert.deepEqual(JSON.parse(await readFile(join(root,'data/plugin/webdav-backup/runners/manifest.json'),'utf8')),JSON.parse(await readFile('dist/runners/manifest.json','utf8')));
   assert.deepEqual(await readFile(join(dir,'master.key')),keyBefore);
   const stored=JSON.parse(await readFile(join(dir,'state.enc.json'),'utf8')),decrypt=createDecipheriv('aes-256-gcm',keyBefore,Buffer.from(stored.iv,'hex'));decrypt.setAuthTag(Buffer.from(stored.tag,'hex'));
   const restored=JSON.parse(Buffer.concat([decrypt.update(Buffer.from(stored.data,'hex')),decrypt.final()]).toString());assert.equal(restored.settings.password,'Local-Secret-测试');assert.ok(restored.jobs.every(j=>!j.enabled));
-  checks.push('official ZIP '+(process.env.KOMARI_PREVIOUS_PACKAGE?'upgrade from '+before.version:'reinstall')+' preserves tasks, credentials, history and disabled schedules');
+  checks.push('official ZIP '+(process.env.KOMARI_PREVIOUS_PACKAGE?'upgrade from '+before.version:'reinstall')+' preserves tasks, credentials and history; creates flat task directories and pauses schedules');
   // 升级后再走一轮真实路由，覆盖 MoeJS 的 UTF-8 截断及心跳去重。
   const messageCount=messages.length;
   r=await request(plugin+'/run',{jobId:jobs[0].id,mode:'test'});assert.equal(r.status,200);const diagnosticRun=r.data.data.id;
   await waitUntil(()=>messages.slice(messageCount).some(m=>m.method==='agent.exec'));
   const nextExec=messages.slice(messageCount).find(m=>m.method==='agent.exec');
   const nextGrant=nextExec.params.command.match(/Authorization: Bearer ([a-f0-9]+)/)[1];
-  r=await request('/api/clients/webdav-backup/claim',{runId:diagnosticRun},false,{Authorization:'Bearer '+nextGrant});assert.equal(r.status,200);const nextToken=r.data.reportToken;
+  r=await request('/api/clients/webdav-backup/claim',{runId:diagnosticRun},false,{Authorization:'Bearer '+nextGrant});assert.equal(r.status,200);assert.equal(r.data.protocol,2);assert.match(r.data.filePrefix,/^[0-9]{8}_[0-9]{6}[+-][0-9]{4}_[a-f0-9]{8}$/);assert.equal(r.data.remoteDir,after.jobs[0].savePath);const nextToken=r.data.reportToken;
   const heartbeatFile=join(dir,'state.enc.json'),heartbeatBefore=await readFile(heartbeatFile);
   for(let i=0;i<3;i++){r=await request('/api/clients/webdav-backup/report',{runId:diagnosticRun,status:'running',stage:'检查备份来源'},false,{Authorization:'Bearer '+nextToken});assert.equal(r.status,200);}
   assert.deepEqual(await readFile(heartbeatFile),heartbeatBefore);

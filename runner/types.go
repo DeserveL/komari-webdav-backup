@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const owner = "komari-webdav-backup/v1"
+const owner = "komari-webdav-backup/v2"
 
 var errAlreadyRunning = errors.New("another backup is running on this node")
 
@@ -23,6 +23,7 @@ type Config struct {
 	Sources        []string `json:"sources"`
 	Excludes       []string `json:"excludes"`
 	RemoteDir      string   `json:"remoteDir"`
+	FilePrefix     string   `json:"filePrefix"`
 	RetentionDays  int      `json:"retentionDays"`
 	WebDAVURL      string   `json:"webdavUrl"`
 	Username       string   `json:"username"`
@@ -33,16 +34,17 @@ type Config struct {
 }
 
 type Report struct {
-	RunID      string   `json:"runId"`
-	Status     string   `json:"status"`
-	Stage      string   `json:"stage"`
-	Bytes      int64    `json:"bytes,omitempty"`
-	SHA256     string   `json:"sha256,omitempty"`
-	RemotePath string   `json:"remotePath,omitempty"`
-	Warnings   []string `json:"warnings"`
-	Error      string   `json:"error,omitempty"`
-	PID        int      `json:"pid,omitempty"`
-	UpdatedAt  string   `json:"updatedAt,omitempty"`
+	RunID        string   `json:"runId"`
+	Status       string   `json:"status"`
+	Stage        string   `json:"stage"`
+	Bytes        int64    `json:"bytes,omitempty"`
+	SHA256       string   `json:"sha256,omitempty"`
+	RemotePath   string   `json:"remotePath,omitempty"`
+	ManifestPath string   `json:"manifestPath,omitempty"`
+	Warnings     []string `json:"warnings"`
+	Error        string   `json:"error,omitempty"`
+	PID          int      `json:"pid,omitempty"`
+	UpdatedAt    string   `json:"updatedAt,omitempty"`
 }
 
 type Manifest struct {
@@ -76,7 +78,7 @@ func validateURL(raw string, allowLoopback bool) error {
 }
 
 func (c Config) Validate(allowLoopback bool) error {
-	if c.Protocol != 1 || (c.Mode != "backup" && c.Mode != "test") || !validID.MatchString(c.RunID) || !validID.MatchString(c.JobID) || !validID.MatchString(c.NodeID) {
+	if c.Protocol != 2 || (c.Mode != "backup" && c.Mode != "test") || !validID.MatchString(c.RunID) || !validID.MatchString(c.JobID) || !validID.MatchString(c.NodeID) || !validPrefix(c.FilePrefix, c.RunID) {
 		return errors.New("invalid protocol, mode or identity")
 	}
 	if err := validateURL(c.WebDAVURL, allowLoopback); err != nil {

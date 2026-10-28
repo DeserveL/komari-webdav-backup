@@ -1,5 +1,20 @@
 # 验证记录
 
+## 0.2.0 单层任务目录
+
+日期：2026-10-28。环境：中文 Windows、Node.js 24.19.0、Go 1.27.3，以及官方 Komari 1.6.1 / MoeJS 隔离实例。
+
+- TypeScript 严格检查及 29 项插件测试通过，覆盖批量任务、同名目录扩展、中文和危险字符、UTF-8 字节限制、面板时间偏移、固定目录及配置升级。
+- Go 测试和 `go vet` 通过，覆盖多次备份平铺、目录归属检查、短名冲突回退与完整名冲突拒绝、条件上传不覆盖、实际 HTTP 下载后摘要与解压内容比较。
+- 保留清理测试覆盖文件对、未知内容与跨任务隔离、危险清单路径、文件删除 202 / 207 / 403、失败后保留清单及后续重试；不执行集合删除。
+- 本地官方 Komari 19 项检查通过，从 GitHub 实际下载的 0.1.2 插件升级，凭据、任务及历史链接保留；目录重新生成、旧任务暂停、测试批准清除，协议为 2。
+- 新版实际路由验证阶段心跳、UTF-8 诊断与新任务保存位置；连续至少 90 秒，状态文件内容、mtime、inode 均不变。
+- 浏览器验证 360px 和 1440px、明暗主题下的创建、保存位置预览、批量保存、改名时路径固定、复制成功提示及恢复说明。手机详情值列宽约 169px，长文件 URL 和摘要无横向溢出。
+
+新版截图：[批量创建桌面暗色](flat-create-1440-dark.png)、[批量创建手机明色](flat-create-360-light.png)、[手机暗色详情](flat-details-360-dark.png)。截图及预览使用本地示例数据。
+
+本轮不连接生产节点或生产 WebDAV。更多 WebDAV 服务对条件上传的兼容性、真实生产恢复与 arm64 硬件仍待部署验收。Linux 的竞态检测、运行锁、双架构及官方运行时结果以本次 [CI](https://github.com/DeserveL/komari-webdav-backup/actions/workflows/ci.yml) 和 [Release](https://github.com/DeserveL/komari-webdav-backup/actions/workflows/release.yml) 为准。
+
 ## 0.1.2 轻量优化
 
 日期：2026-10-27。环境：中文 Windows，Node.js 24.19.0、Go 1.27.3，官方 Komari 1.6.1 / MoeJS 隔离实例。

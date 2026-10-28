@@ -24,6 +24,7 @@ import (
 )
 
 type mockDAV struct {
+	fileDeleteCode        map[string]int
 	mu                    sync.Mutex
 	files                 map[string][]byte
 	dirs                  map[string]bool
@@ -61,11 +62,17 @@ func (d *mockDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(201)
 		}
 	case "PUT":
-		if d.failPUT && strings.HasSuffix(p, "backup.tar.gz") {
+		if r.Header.Get("If-None-Match") == "*" {
+			if _, ok := d.files[p]; ok {
+				w.WriteHeader(412)
+				return
+			}
+		}
+		if d.failPUT && strings.HasSuffix(p, ".tar.gz") {
 			w.WriteHeader(403)
 			return
 		}
-		if strings.HasSuffix(p, "backup.tar.gz") && d.retries > 0 {
+		if strings.HasSuffix(p, ".tar.gz") && d.retries > 0 {
 			d.retries--
 			w.WriteHeader(503)
 			return
@@ -84,7 +91,7 @@ func (d *mockDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		n := len(data)
-		if d.wrongSize && strings.HasSuffix(p, "backup.tar.gz") {
+		if d.wrongSize && strings.HasSuffix(p, ".tar.gz") {
 			n++
 		}
 		w.Header().Set("Content-Length", fmt.Sprint(n))
@@ -97,6 +104,10 @@ func (d *mockDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write(data)
 	case "DELETE":
+		if code := d.fileDeleteCode[p]; code != 0 {
+			w.WriteHeader(code)
+			return
+		}
 		if d.dirs[p] {
 			if d.directoryDeleteCode != 0 {
 				w.WriteHeader(d.directoryDeleteCode)
@@ -117,7 +128,7 @@ func (d *mockDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		delete(d.files, p)
-		if d.injectOnArchiveDelete && strings.HasSuffix(p, "/backup.tar.gz") {
+		if d.injectOnArchiveDelete && strings.HasSuffix(p, ".tar.gz") {
 			d.files[path.Join(path.Dir(p), "new-user-file.txt")] = []byte("concurrent content")
 		}
 		d.deleted = append(d.deleted, p)
@@ -169,22 +180,32 @@ func fixtureConfig(t *testing.T, endpoint string) (Config, string, string) {
 	if err := os.WriteFile(filepath.Join(source, "debug.log"), []byte("exclude me"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	c := Config{Protocol: 1, Mode: "backup", RunID: "run-new", JobID: "job-a", NodeID: "node-a", Sources: []string{source}, Excludes: []string{"**/*.log"}, RemoteDir: "备份/prod/node-a/job-a", RetentionDays: 7, WebDAVURL: endpoint, Username: "user", Password: "secret", TimeoutMinutes: 5}
+	c := Config{Protocol: 2, Mode: "backup", RunID: testID("run-new"), JobID: "job-a", NodeID: "node-a", Sources: []string{source}, Excludes: []string{"**/*.log"}, RemoteDir: "备份/东京_配置_a81c2f90", FilePrefix: testPrefix(testID("run-new")), RetentionDays: 7, WebDAVURL: endpoint, Username: "user", Password: "secret", TimeoutMinutes: 5}
 	return c, source, state
 }
+func testID(value string) string {
+	hash := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(hash[:])[:32]
+}
+func testPrefix(id string) string { return "20261028_020000+0800_" + shortRunID(id) }
+func remoteArchive(c Config) string {
+	return "/" + path.Join(c.RemoteDir, archiveNameFor(c.FilePrefix))
+}
+func remoteManifest(c Config) string { return "/" + path.Join(c.RemoteDir, manifestName(c.FilePrefix)) }
 func addManifest(t *testing.T, d *mockDAV, c Config, id string, age time.Duration, valid bool) string {
 	t.Helper()
-	dir := "/" + path.Join(c.RemoteDir, id)
-	d.dirs[dir] = true
+	id = testID(id)
+	prefix := testPrefix(id)
+	base := "/" + path.Join(c.RemoteDir, prefix)
 	data := []byte("old archive")
 	hash := sha256.Sum256(data)
-	m := Manifest{Owner: owner, Version: 1, RunID: id, NodeID: c.NodeID, JobID: c.JobID, CompletedAt: time.Now().UTC().Add(-age), Archive: "backup.tar.gz", Size: int64(len(data)), SHA256: hex.EncodeToString(hash[:])}
+	m := Manifest{Owner: owner, Version: 2, RunID: id, NodeID: c.NodeID, JobID: c.JobID, CompletedAt: time.Now().UTC().Add(-age), Archive: archiveNameFor(prefix), Size: int64(len(data)), SHA256: hex.EncodeToString(hash[:])}
 	if !valid {
 		m.NodeID = "another-node"
 	}
-	d.files[path.Join(dir, "backup.tar.gz")] = data
-	d.files[path.Join(dir, "manifest.json")], _ = json.Marshal(m)
-	return dir
+	d.files[base+".tar.gz"] = data
+	d.files[base+".manifest.json"], _ = json.Marshal(m)
+	return base
 }
 func TestBackupRoundTripAndRetentionIsolation(t *testing.T) {
 	d, s := fixtureDAV(t)
@@ -195,29 +216,39 @@ func TestBackupRoundTripAndRetentionIsolation(t *testing.T) {
 	}
 	old := addManifest(t, d, c, "run-old", 10*24*time.Hour, true)
 	cleanOld := addManifest(t, d, c, "run-clean-old", 12*24*time.Hour, true)
-	foreign := addManifest(t, d, c, "run-foreign", 20*24*time.Hour, false)
+	foreign := addManifest(t, d, c, "run-foreign", time.Hour, true)
 	recent := addManifest(t, d, c, "run-recent", time.Hour, true)
 	d.files["/"+path.Join(c.RemoteDir, "unrelated.tar.gz")] = []byte("leave alone")
-	d.files[path.Join(old, "notes.txt")] = []byte("not owned")
+	d.files["/"+path.Join(c.RemoteDir, "notes.txt")] = []byte("not owned")
 	r := execute(context.Background(), c, state, func(Report) {})
-	if r.Status != "warning" {
+	if r.Status != "success" {
 		t.Fatalf("%+v", r)
 	}
-	if _, ok := d.files[path.Join(cleanOld, "backup.tar.gz")]; ok {
+	if _, ok := d.files[cleanOld+".tar.gz"]; ok {
 		t.Fatal("expired owned backup was not removed")
 	}
-	if d.dirs[cleanOld] {
-		t.Fatal("expired run directory was not removed")
+	for dir := range d.dirs {
+		if strings.HasPrefix(dir, "/"+c.RemoteDir+"/") {
+			t.Fatal("unexpected per-run directory")
+		}
 	}
-	if _, ok := d.files[path.Join(old, "backup.tar.gz")]; !ok {
-		t.Fatal("directory with unknown content modified")
+	if _, ok := d.files[old+".tar.gz"]; ok {
+		t.Fatal("expired archive retained")
 	}
-	for _, file := range []string{path.Join(old, "notes.txt"), path.Join(foreign, "backup.tar.gz"), path.Join(recent, "backup.tar.gz"), "/" + path.Join(c.RemoteDir, "unrelated.tar.gz")} {
+	for _, file := range []string{"/" + path.Join(c.RemoteDir, "notes.txt"), foreign + ".tar.gz", recent + ".tar.gz", "/" + path.Join(c.RemoteDir, "unrelated.tar.gz")} {
 		if _, ok := d.files[file]; !ok {
 			t.Fatalf("unrelated or recent file removed: %s", file)
 		}
 	}
-	archive := d.files["/"+path.Join(c.RemoteDir, c.RunID, "backup.tar.gz")]
+	download, err := dav.request(context.Background(), "GET", strings.TrimPrefix(remoteArchive(c), "/"), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := io.ReadAll(download.Body)
+	closeResponse(download)
+	if err != nil {
+		t.Fatal(err)
+	}
 	hash := sha256.Sum256(archive)
 	if hex.EncodeToString(hash[:]) != r.SHA256 {
 		t.Fatal("digest mismatch")
@@ -269,7 +300,7 @@ func TestMissingSourceFailsWithoutCompletedManifest(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	for name := range d.files {
-		if strings.HasSuffix(name, "manifest.json") {
+		if strings.HasSuffix(name, ".manifest.json") {
 			t.Fatal("manifest written after failure")
 		}
 	}
@@ -288,10 +319,10 @@ func TestUploadFailureAndWrongSizeNeverCleanOldBackups(t *testing.T) {
 			if r.Status != "failed" {
 				t.Fatalf("%+v", r)
 			}
-			if _, ok := d.files[path.Join(old, "backup.tar.gz")]; !ok {
+			if _, ok := d.files[old+".tar.gz"]; !ok {
 				t.Fatal("old backup removed on failure")
 			}
-			if _, ok := d.files["/"+path.Join(c.RemoteDir, c.RunID, "manifest.json")]; ok {
+			if _, ok := d.files[remoteManifest(c)]; ok {
 				t.Fatal("failure published as complete")
 			}
 		})
@@ -315,14 +346,15 @@ func TestTestModeAndRetentionZero(t *testing.T) {
 		t.Fatalf("probe left files: %+v", r)
 	}
 	c.Mode = "backup"
-	c.RunID = "another-run"
+	c.RunID = testID("another-run")
+	c.FilePrefix = testPrefix(c.RunID)
 	c.RetentionDays = 0
 	old := addManifest(t, d, c, "run-old", 365*24*time.Hour, true)
 	r = execute(context.Background(), c, state, func(Report) {})
 	if r.Status != "success" {
 		t.Fatalf("%+v", r)
 	}
-	if _, ok := d.files[path.Join(old, "backup.tar.gz")]; !ok {
+	if _, ok := d.files[old+".tar.gz"]; !ok {
 		t.Fatal("retention=0 deleted backup")
 	}
 }
@@ -335,7 +367,8 @@ func TestAuthenticationAndCancelledContext(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	c.Password = "secret"
-	c.RunID = "cancelled"
+	c.RunID = testID("cancelled")
+	c.FilePrefix = testPrefix(c.RunID)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	r = execute(ctx, c, state, func(Report) {})
@@ -470,7 +503,7 @@ func TestMainCommandClaimsReportsAndReusesResult(t *testing.T) {
 	if strings.Contains(string(data), "secret") || strings.Contains(string(data), "report-only") {
 		t.Fatal("credentials persisted in local result")
 	}
-	if _, ok := d.files["/"+path.Join(c.RemoteDir, c.RunID, "manifest.json")]; !ok {
+	if _, ok := d.files[remoteManifest(c)]; !ok {
 		t.Fatal("completed manifest missing")
 	}
 }
@@ -483,7 +516,7 @@ func TestSingleFileBackup(t *testing.T) {
 	if r.Status != "success" {
 		t.Fatalf("%+v", r)
 	}
-	if len(d.files["/"+path.Join(c.RemoteDir, c.RunID, "backup.tar.gz")]) == 0 {
+	if len(d.files[remoteArchive(c)]) == 0 {
 		t.Fatal("single file archive missing")
 	}
 }
@@ -500,10 +533,10 @@ func TestRetentionKeepsNewestSuccessfulBackupEvenWhenExpired(t *testing.T) {
 	if warnings := dav.cleanup(context.Background(), c, time.Now()); len(warnings) > 0 {
 		t.Fatal(warnings)
 	}
-	if _, ok := d.files[path.Join(newer, "backup.tar.gz")]; !ok {
+	if _, ok := d.files[newer+".tar.gz"]; !ok {
 		t.Fatal("newest success deleted")
 	}
-	if _, ok := d.files[path.Join(older, "backup.tar.gz")]; ok {
+	if _, ok := d.files[older+".tar.gz"]; ok {
 		t.Fatal("expired older backup retained")
 	}
 }

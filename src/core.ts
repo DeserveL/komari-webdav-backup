@@ -2,6 +2,7 @@ import { RUNNER_API, defaults, Job, NodeInfo, Report, Run, RunnerConfig, Setting
 import * as validate from './validation';
 import { Binaries, bootstrap } from './bootstrap';
 import { HISTORY_DAYS, HISTORY_LIMIT, limitDiagnostics } from './history';
+import { taskDirectory, runPrefix } from './layout';
 
 export type Host = {
   now(): number; id(): string; token(): string; hash(value: string): string;
@@ -33,9 +34,9 @@ export class BackupService {
   }
   view() {
     return { settings: { ...this.state.settings, password: '', passwordSet: !!this.state.settings.password },
-      jobs: this.state.jobs.map(j => ({ ...j, nextRun: new Date(validate.nextSlot(j.schedule, this.host.now())).toISOString() })),
+      jobs: this.state.jobs.map(j => ({ ...j, savePath: [this.state.settings.baseDir, j.taskDir].filter(Boolean).join('/'), nextRun: new Date(validate.nextSlot(j.schedule, this.host.now())).toISOString() })),
       runs: [...this.state.runs].reverse().slice(0, 200).map(r => this.publicRun(r)),
-      time: this.iso(), timezone: new Date(this.host.now()).toString(), timezoneOffset: new Date(this.host.now()).getTimezoneOffset(), version: '0.1.2' };
+      time: this.iso(), timezone: new Date(this.host.now()).toString(), timezoneOffset: new Date(this.host.now()).getTimezoneOffset(), version: '0.2.0' };
   }
   publicRun(r: Run) {
     const { config, startupHash, startupExpires, reportHash, reportExpires, recoveryHash, recoveryExpires, ...safe } = r;
@@ -59,11 +60,15 @@ export class BackupService {
   async saveJobs(inputs: Partial<Job>[]) {
     if (!Array.isArray(inputs) || !inputs.length || inputs.length > 128) throw new Error('请选择 1 到 128 台服务器');
     const nodes = await this.nodes();
+    const occupied = new Set(this.state.jobs.map(j => j.taskDir.toLowerCase()));
     const updates = inputs.map(input => {
       if (!nodes.some(n => n.uuid === input.nodeId)) throw new Error('所选服务器不存在');
       const old = input.id ? this.state.jobs.find(j => j.id === input.id) : undefined;
       if (input.id && !old) throw new Error('任务不存在');
-      return validate.job(input, old?.id ?? this.host.id(), this.host.now(), old);
+      const job = validate.job(input, old?.id ?? this.host.id(), this.host.now(), old);
+      if (old && old.nodeId !== job.nodeId) throw new Error('请为其他服务器单独创建任务');
+      if (!old) job.taskDir = taskDirectory(nodes.find(n => n.uuid === job.nodeId)!.name, job.name, job.id, occupied);
+      return job;
     });
     if (this.state.jobs.length + updates.filter(j => !this.state.jobs.some(old => old.id === j.id)).length > 1000) throw new Error('最多保存 1000 个备份任务');
     for (const j of updates) { const index = this.state.jobs.findIndex(old => old.id === j.id); if (index < 0) this.state.jobs.push(j); else this.state.jobs[index] = j; }
@@ -97,8 +102,8 @@ export class BackupService {
   }
   private config(j: Job, r: Run): RunnerConfig {
     const s = this.state.settings;
-    return { protocol: 1, mode: r.mode, runId: r.id, jobId: j.id, nodeId: j.nodeId, sources: [...j.sources], excludes: [...j.excludes],
-      remoteDir: [s.baseDir, j.remoteDir, j.nodeId, j.id].filter(Boolean).join('/'), retentionDays: j.retentionDays,
+    return { protocol: 2, mode: r.mode, runId: r.id, jobId: j.id, nodeId: j.nodeId, filePrefix: r.filePrefix!, sources: [...j.sources], excludes: [...j.excludes],
+      remoteDir: [s.baseDir, j.taskDir].filter(Boolean).join('/'), retentionDays: j.retentionDays,
       webdavUrl: s.webdavUrl, username: s.username, password: s.password, timeoutMinutes: s.timeoutMinutes,
       reportUrl: s.panelUrl + RUNNER_API + '/report' };
   }
@@ -142,6 +147,7 @@ export class BackupService {
     const j = this.state.jobs.find(j => j.id === r.jobId);
     if (!j) { this.finish(r, { runId: r.id, status: 'failed', stage: '任务不存在' }); return; }
     const grant = this.host.token();
+    r.filePrefix = runPrefix(this.host.now(), r.id);
     r.config = this.config(j, r); r.startupHash = this.host.hash(grant); r.startupExpires = this.host.now() + 5 * 60_000;
     r.status = 'dispatching'; r.stage = '部署执行器并检查环境'; r.updatedAt = this.iso(); this.persist();
     try {
@@ -194,6 +200,7 @@ export class BackupService {
   private finish(r: Run, data: Report) {
     r.status = data.status; r.stage = this.redact(data.stage); r.updatedAt = this.iso(); r.finishedAt = this.iso();
     r.bytes = data.bytes; r.sha256 = data.sha256; r.remotePath = this.redact(data.remotePath);
+    r.manifestPath = data.manifestPath ? this.redact(data.manifestPath) : undefined;
     r.warnings = (data.warnings ?? []).slice(0, 100).map(x => this.redact(x)); r.error = data.error ? this.redact(data.error) : undefined;
     const j = this.state.jobs.find(j => j.id === r.jobId);
     if (j && r.config && ['success', 'warning'].includes(r.status) && JSON.stringify(r.config) === JSON.stringify(this.config(j, r))) j.lastTestAt = this.iso();

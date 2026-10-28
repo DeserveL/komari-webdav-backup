@@ -1,4 +1,5 @@
 export {};
+import { directoryLabel } from '../src/layout';
 const API = '/api/admin/webdav-backup';
 type Item = Record<string, any>;
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
@@ -24,6 +25,25 @@ function panelDate(value?: string) {
 }
 function size(n: number) { if (!n) return '—'; return n >= 1024**3 ? (n/1024**3).toFixed(2)+' GB' : n >= 1024**2 ? (n/1024**2).toFixed(1)+' MB' : (n/1024).toFixed(1)+' KB'; }
 function nodeName(id: string) { return state.nodes.find(n => n.uuid === id)?.name || id; }
+async function copyLocation(value: string) {
+  if (navigator.clipboard) await navigator.clipboard.writeText(value);
+  else {
+    const input = document.createElement('textarea'); input.value = value; document.body.append(input); input.select();
+    const copied = document.execCommand('copy'); input.remove();
+    if (!copied) throw new Error('请选中保存位置后复制');
+  }
+  message('保存位置已复制');
+}
+function previewLocations() {
+  const container = $('#save-preview'); container.replaceChildren();
+  const old = state.data?.jobs.find((j: Item) => j.id === state.editId);
+  if (old) { container.append(el('div', old.savePath, 'save-location')); return; }
+  for (const input of jobForm.querySelectorAll<HTMLInputElement>('input[name=node]:checked')) {
+    const path = [state.data?.settings.baseDir, directoryLabel(nodeName(input.value), field(jobForm,'name').value) + '_<自动编号>'].filter(Boolean).join('/');
+    container.append(el('div', path, 'save-location'));
+  }
+  if (!container.children.length) container.append(el('span', '选择服务器后显示保存位置', 'muted'));
+}
 function render() {
   const data = state.data!;
   $('#stat-jobs').textContent = String(data.jobs.length);
@@ -37,6 +57,7 @@ function render() {
   $('#jobs-empty').hidden = data.jobs.length > 0;
   for (const j of data.jobs as Item[]) {
     const row = el('tr'), name = el('td', j.name); name.append(el('span', nodeName(j.nodeId), 'sub')); row.append(name);
+    name.append(el('span', j.savePath, 'sub save-location'));
     const sources = el('td', j.sources[0]); sources.append(el('span', j.sources.length > 1 ? `共 ${j.sources.length} 个来源` : '文件或目录', 'sub')); row.append(sources);
     const when = el('td', (j.schedule.kind === 'daily' ? '每天 ' : '每周'+'日一二三四五六'[j.schedule.weekday]+' ')+j.schedule.time);
     when.append(el('span', j.enabled ? '下次 '+panelDate(j.nextRun) : '保留 '+(j.retentionDays ? j.retentionDays+' 天' : '全部备份'), 'sub')); row.append(when);
@@ -45,7 +66,7 @@ function render() {
     actions.append(button('立即备份', async () => { await request('/run', { jobId: j.id }); message('备份已加入队列'); tab('runs'); await refresh(); }),
       button('测试连接', async () => { await request('/run', { jobId: j.id, mode: 'test' }); message('节点连接测试已加入队列'); tab('runs'); await refresh(); }),
       button(j.enabled ? '暂停' : '启用', async () => { await request('/jobs', { jobs: [{ ...j, enabled: !j.enabled }] }); await refresh(); }),
-      button('编辑', () => openJob(j)), button('删除', async () => { if (confirm(`删除“${j.name}”？已有远端备份会保留。`)) { await request('/delete-job', { id: j.id }); await refresh(); } }, true));
+      button('复制保存位置', () => copyLocation(j.savePath)), button('编辑', () => openJob(j)), button('删除', async () => { if (confirm(`删除“${j.name}”？已有远端备份会保留。`)) { await request('/delete-job', { id: j.id }); await refresh(); } }, true));
     const cell = el('td'); cell.append(actions); row.append(cell); jobs.append(row);
   }
   const runs = $('#runs-body'); runs.replaceChildren(); $('#runs-empty').hidden = data.runs.length > 0;
@@ -59,10 +80,10 @@ function render() {
 }
 function detail(r: Item) {
   const dl = el('dl', '', 'detail-grid');
-  for (const [label, value] of [['任务',r.jobName],['服务器',nodeName(r.nodeId)],['结果',labels[r.status]],['阶段',r.stage],['加入队列',panelDate(r.createdAt)],['开始时间',panelDate(r.startedAt)],['结束时间',panelDate(r.finishedAt)],['耗时',r.durationSeconds === undefined ? undefined : r.durationSeconds+' 秒'],['归档大小',size(r.bytes)],['远端位置',r.remotePath],['SHA-256',r.sha256],['警告',(r.warnings || []).join('\n')],['失败原因',r.error],['通知结果',r.notificationError ? '发送失败：'+r.notificationError : r.notify ? '使用 Komari 通知设置' : '未开启'],['运行编号',r.id]]) {
+  for (const [label, value] of [['任务',r.jobName],['服务器',nodeName(r.nodeId)],['结果',labels[r.status]],['阶段',r.stage],['加入队列',panelDate(r.createdAt)],['开始时间',panelDate(r.startedAt)],['结束时间',panelDate(r.finishedAt)],['耗时',r.durationSeconds === undefined ? undefined : r.durationSeconds+' 秒'],['归档大小',size(r.bytes)],['归档位置',r.remotePath],['清单位置',r.manifestPath],['SHA-256',r.sha256],['警告',(r.warnings || []).join('\n')],['失败原因',r.error],['通知结果',r.notificationError ? '发送失败：'+r.notificationError : r.notify ? '使用 Komari 通知设置' : '未开启'],['运行编号',r.id]]) {
     if (!value) continue; dl.append(el('dt', String(label)), el('dd', String(value)));
   }
-  $('#detail-content').replaceChildren(dl); $<HTMLDialogElement>('#detail-dialog').showModal();
+  const actions = el('div', '', 'actions'); if (r.remotePath) actions.append(button('复制归档位置', () => copyLocation(r.remotePath))); if (r.manifestPath) actions.append(button('复制清单位置', () => copyLocation(r.manifestPath))); $('#detail-content').replaceChildren(dl, actions); $<HTMLDialogElement>('#detail-dialog').showModal();
 }
 function fillSettings() {
   const settings = state.data!.settings;
@@ -81,11 +102,14 @@ function openJob(job?: Item) {
   }
   if (!state.nodes.length) list.append(el('span', '暂无可选服务器，请先在 Komari 中添加节点。', 'muted'));
   if (job) {
-    for (const name of ['name','remoteDir','retentionDays']) field(jobForm, name).value = String(job[name]);
+    for (const name of ['name','retentionDays']) field(jobForm, name).value = String(job[name]);
     field(jobForm, 'sources').value = job.sources.join('\n'); field(jobForm, 'excludes').value = job.excludes.join('\n'); field(jobForm, 'notify').checked = job.notify;
     for (const name of ['kind','time','weekday']) field(jobForm, name).value = String(job.schedule[name]);
   }
   $('#weekday-label').hidden = field(jobForm, 'kind').value !== 'weekly';
+  previewLocations();
+  $('#copy-save-path').hidden = !job;
+  $('#copy-save-path').onclick = () => { if (job) void action($<HTMLButtonElement>('#copy-save-path'), async () => { await copyLocation(job.savePath); }); };
   $<HTMLDialogElement>('#job-dialog').showModal();
 }
 async function refresh() {
@@ -98,6 +122,8 @@ document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b => b.onclic
 document.querySelectorAll<HTMLButtonElement>('[data-close]').forEach(b => b.onclick = () => $<HTMLDialogElement>('#'+b.dataset.close).close());
 $('#new-job').onclick = () => openJob(); $('#empty-settings').onclick = () => tab('settings');
 field(jobForm, 'kind').onchange = () => { $('#weekday-label').hidden = field(jobForm, 'kind').value !== 'weekly'; };
+jobForm.addEventListener('input', previewLocations);
+jobForm.addEventListener('change', previewLocations);
 $('#refresh').onclick = () => { void action($<HTMLButtonElement>('#refresh'), refresh); };
 settingsForm.onsubmit = event => { event.preventDefault(); void action(settingsForm.querySelector('button[type=submit]')!, async () => {
   const data = Object.fromEntries(new FormData(settingsForm)); data.concurrency = String(Number(data.concurrency)); data.timeoutMinutes = String(Number(data.timeoutMinutes));
@@ -109,7 +135,7 @@ jobForm.onsubmit = event => { event.preventDefault(); void action(jobForm.queryS
   if (!selected.length) throw new Error('请至少选择一台服务器');
   const old = state.data!.jobs.find((j: Item) => j.id === state.editId);
   const lines = (name: string) => field(jobForm, name).value.split('\n').map(x => x.trim()).filter(Boolean);
-  await request('/jobs', { jobs: selected.map(nodeId => ({ id: state.editId, nodeId, name: field(jobForm,'name').value, sources: lines('sources'), excludes: lines('excludes'), remoteDir: field(jobForm,'remoteDir').value,
+  await request('/jobs', { jobs: selected.map(nodeId => ({ id: state.editId, nodeId, name: field(jobForm,'name').value, sources: lines('sources'), excludes: lines('excludes'),
     schedule: { kind: field(jobForm,'kind').value, time: field(jobForm,'time').value, weekday: Number(field(jobForm,'weekday').value) }, retentionDays: Number(field(jobForm,'retentionDays').value), notify: field(jobForm,'notify').checked, enabled: old?.enabled ?? false })) });
   $<HTMLDialogElement>('#job-dialog').close(); message('备份任务已保存'); await refresh();
 }); };

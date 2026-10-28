@@ -25,16 +25,16 @@ func execute(ctx context.Context, c Config, stateDir string, emit func(Report)) 
 func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Report)) Report {
 	r := Report{RunID: c.RunID, Status: "running", Stage: "检查备份来源", Warnings: []string{}}
 	var d *DAV
-	incompleteDir := ""
+	incompleteFile := ""
 	published := false
 	fail := func(err error) Report {
 		r.Status = "failed"
 		r.Error = redact(err.Error(), c.Password)
-		if d != nil && incompleteDir != "" && !published {
+		if d != nil && incompleteFile != "" && !published {
 			cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			if e := d.deleteFile(cleanup, path.Join(incompleteDir, "backup.tar.gz")); e != nil {
-				r.Warnings = append(r.Warnings, "incomplete remote upload may remain in "+incompleteDir)
+			if e := d.deleteFile(cleanup, incompleteFile); e != nil {
+				r.Warnings = append(r.Warnings, "incomplete remote upload may remain: "+incompleteFile)
 			}
 		}
 		return r
@@ -94,6 +94,10 @@ func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Rep
 	r.Stage = "检查 WebDAV 读写权限"
 	emit(r)
 	if err = d.mkdir(ctx, c.RemoteDir); err != nil {
+		return fail(err)
+	}
+	prefix, err := d.choosePrefix(ctx, c)
+	if err != nil {
 		return fail(err)
 	}
 	probe := path.Join(c.RemoteDir, ".probe-"+c.RunID)
@@ -174,39 +178,50 @@ func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Rep
 	r = boundReport(r)
 	r.Stage = "正在上传"
 	emit(r)
-	runDir := path.Join(c.RemoteDir, c.RunID)
-	if err = d.mkdir(ctx, runDir); err != nil {
+	archiveRemote := path.Join(c.RemoteDir, archiveNameFor(prefix))
+	manifestRemote := path.Join(c.RemoteDir, manifestName(prefix))
+	if err = d.putNew(ctx, archiveRemote, func() (io.ReadCloser, int64, error) {
+		f, e := os.Open(archive)
+		if e != nil {
+			return nil, 0, e
+		}
+		info, e := f.Stat()
+		if e != nil {
+			_ = f.Close()
+			return nil, 0, e
+		}
+		return f, info.Size(), nil
+	}); err != nil {
+		r.Warnings = append(r.Warnings, "upload was not confirmed; inspect any incomplete file at "+archiveRemote)
 		return fail(err)
 	}
-	incompleteDir = runDir
-	if err = d.putFile(ctx, path.Join(runDir, "backup.tar.gz"), archive); err != nil {
-		return fail(err)
-	}
+	incompleteFile = archiveRemote
 	r.Stage = "核对远端文件大小"
 	emit(r)
-	if err = d.verifySize(ctx, path.Join(runDir, "backup.tar.gz"), r.Bytes); err != nil {
+	if err = d.verifySize(ctx, archiveRemote, r.Bytes); err != nil {
 		return fail(err)
 	}
-	m := Manifest{Owner: owner, Version: 1, RunID: c.RunID, JobID: c.JobID, NodeID: c.NodeID,
-		CompletedAt: time.Now().UTC(), Archive: "backup.tar.gz", Size: r.Bytes, SHA256: r.SHA256, Sources: c.Sources, Warnings: r.Warnings}
+	m := Manifest{Owner: owner, Version: 2, RunID: c.RunID, JobID: c.JobID, NodeID: c.NodeID,
+		CompletedAt: time.Now().UTC(), Archive: archiveNameFor(prefix), Size: r.Bytes, SHA256: r.SHA256, Sources: c.Sources, Warnings: r.Warnings}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fail(err)
 	}
-	if err = d.put(ctx, path.Join(runDir, "manifest.json"), bytesBody(data)); err != nil {
+	if err = d.putNew(ctx, manifestRemote, bytesBody(data)); err != nil {
 		// PUT 的响应丢失时，完成清单可能已经写入，保留归档供人工核对。
 		published = true
 		return fail(err)
 	}
 	published = true
 	var saved Manifest
-	if err = d.getJSON(ctx, path.Join(runDir, "manifest.json"), &saved); err != nil {
+	if err = d.getJSON(ctx, manifestRemote, &saved); err != nil {
 		return fail(err)
 	}
-	if saved.Owner != owner || saved.RunID != c.RunID || saved.SHA256 != r.SHA256 || saved.Size != r.Bytes {
+	if !validManifest(saved, c, manifestName(prefix), time.Now().UTC()) || saved.RunID != c.RunID || saved.SHA256 != r.SHA256 || saved.Size != r.Bytes {
 		return fail(fmt.Errorf("remote manifest verification failed"))
 	}
-	r.RemotePath = d.target(path.Join(runDir, "backup.tar.gz")).String()
+	r.RemotePath = d.target(archiveRemote).String()
+	r.ManifestPath = d.target(manifestRemote).String()
 	r.Stage = "正在清理过期备份"
 	emit(r)
 	// 有变化警告的归档仍可下载，但不能用来淘汰上一次完整成功的备份。
