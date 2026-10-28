@@ -147,3 +147,18 @@ test('30天整的历史保留，超期在加载时裁剪；长诊断总计不超
   assert.ok(Buffer.byteLength(text)<=16384);assert.match(text,/已截断/);assert.ok(!text.includes('\ufffd'));
   let saves=0;f.host.save=()=>saves++;new BackupService(restored.state,f.host);assert.equal(saves,0);
 });
+
+
+test('请求诊断脱敏、有界，警告和通知保留；同阶段心跳不写盘',async()=>{
+  const f=fixture(),j=await f.makeJob(),r=f.service.enqueue(j.id);await f.service.tick();
+  const grant=f.calls.find(c=>c.method==='admin:exec').params.command.match(/Authorization: Bearer (grant-\d+)/)[1],cfg=f.service.claim(r.id,grant);
+  let saves=0;f.host.save=()=>saves++;
+  f.service.report({runId:r.id,status:'running',stage:'检查备份来源',requestDiagnostics:['HEAD HTTP 423']},cfg.reportToken);assert.equal(saves,0);
+  assert.throws(()=>f.service.report({runId:r.id,status:'running',stage:'检查备份来源',requestDiagnostics:[42]},cfg.reportToken),/格式/);
+  const warning='上传响应异常，仅核对文件大小，未核验远端内容摘要';
+  f.service.report({runId:r.id,status:'warning',stage:'备份完成，有警告',warnings:[warning],requestDiagnostics:Array(30).fill('PUT 502 super-secret-password https://user:pass@dav.example/file?token=private Bearer private '+'中文'.repeat(150))},cfg.reportToken);
+  const text=r.requestDiagnostics.join('');assert.ok(r.requestDiagnostics.length<=16);assert.ok(Buffer.byteLength(text)<=4096);assert.ok(!text.includes('super-secret-password'));assert.ok(!text.includes('private'));assert.ok(!text.includes('user:pass'));assert.ok(!text.includes('\ufffd'));
+  assert.equal(r.status,'warning');assert.equal(r.warnings[0],warning);assert.equal(f.service.view().runs[0].requestDiagnostics.length,r.requestDiagnostics.length);
+  await f.service.tick();assert.ok(f.calls.find(c=>c.method==='admin:sendNotification').params.event.message.includes(warning));
+  saves=0;new BackupService(f.state,f.host);assert.equal(saves,0);
+});

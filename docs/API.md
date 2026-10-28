@@ -23,7 +23,7 @@
 
 - `GET /binary?run=<ID>&arch=amd64|arm64`：启动或核对下载授权；另外校验执行器 SHA-256。
 - `POST /claim`：启动授权，正文 `{runId}`，5 分钟内只能领取一次。返回 `protocol:2`、完整运行/任务/节点 ID、来源和排除、任务目录 `remoteDir`、文件前缀 `filePrefix`、保留天数、超时、WebDAV 凭据及 `reportUrl,reportToken`。
-- `POST /report`：回报授权，正文 `{runId,status,stage,bytes?,sha256?,remotePath?,manifestPath?,warnings?,error?}`。终态幂等，回报授权不能领取配置。
+- `POST /report`：回报授权，正文 `{runId,status,stage,bytes?,sha256?,remotePath?,manifestPath?,warnings?,error?,requestDiagnostics?}`。终态幂等，回报授权不能领取配置。
 
 `filePrefix` 来自面板派发时间，格式为 `YYYYMMDD_HHmmss±HHmm_<运行短编号>`。节点短名冲突时使用完整运行 ID。回报中的 `remotePath`、`manifestPath` 为实际文件地址，包括回退后的文件名。进度每 15 秒回报，本地结果不含凭据，并以 `KWB_RESULT:<JSON>` 输出供宿主核对。
 
@@ -36,3 +36,11 @@
 状态内部版本升为 2，可从版本 1 升级本地任务信息并暂停旧任务；不兼容扫描旧版远端归档。旧运行历史链接及结果核对保留。
 
 HEAD 只校验远端大小；归档恢复仍须下载并核对 SHA-256、解压和检查文件内容。
+
+## 0.2.1 请求诊断与大小核对
+
+运行记录和执行器回报增加可选 `requestDiagnostics: string[]`，最多 16 条、4 KiB UTF-8，计入每条记录的 16 KiB 诊断总限额。终态回报保存后通过管理 API 返回，旧记录省略该字段。该字段本身不改变结果状态，相同阶段重复心跳不写盘。执行器协议及清单仍为版本 2。
+
+上传响应异常后仅进行元数据大小核对，连续两次符合本地大小才继续发布清单；不 GET 远端归档。恢复的记录为 `warning`，清单 `warnings` 包含“上传响应异常，仅核对文件大小，未核验远端内容摘要”；`sha256` 为本地归档摘要，不能据此声明远端内容已核验。此类备份不触发保留清理。
+
+超过核对时间仍不明确，返回 `failed`，阶段为“上传结果未确认”或“完成清单发布结果未确认”，保留目标链接供人工检查。该状态不同于面板派发或回传中断产生的 `pending`，不会无限占用执行槽。原上传可能仍由存储服务处理，插件不会重放或删除这些不明确的写入。

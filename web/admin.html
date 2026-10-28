@@ -3,7 +3,7 @@
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WebDAV 备份</title><link rel="stylesheet" href="admin.css"><script src="admin.js" defer></script></head>
 <body>
 <main>
-  <header class="header"><div><div class="eyebrow">服务器数据管理</div><h1>WebDAV 备份 <span class="version">v0.2.0</span></h1><p class="muted">配置备份任务，按时保存文件，并随时查看执行结果。</p></div><button id="refresh" class="secondary">刷新</button></header>
+  <header class="header"><div><div class="eyebrow">服务器数据管理</div><h1>WebDAV 备份 <span class="version">v0.2.1</span></h1><p class="muted">配置备份任务，按时保存文件，并随时查看执行结果。</p></div><button id="refresh" class="secondary">刷新</button></header>
   <div id="message" class="message" role="status" hidden></div>
   <section class="stats" aria-label="备份概况"><article><span>备份任务</span><strong id="stat-jobs">—</strong><small id="stat-enabled">正在读取</small></article><article><span>执行中 / 等待中</span><strong id="stat-active">—</strong><small>同一服务器依次执行</small></article><article><span>最近一次备份</span><strong id="stat-last" class="stat-word">—</strong><small id="stat-last-time">暂无记录</small></article></section>
   <nav class="tabs" aria-label="备份管理"><button data-tab="jobs" class="selected">备份任务</button><button data-tab="runs">执行记录</button><button data-tab="settings">公用存储</button><button data-tab="restore">恢复文件</button></nav>

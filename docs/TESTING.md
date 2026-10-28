@@ -1,5 +1,18 @@
 # 验证记录
 
+## 0.2.1 慢上传与代理容错
+
+日期：2026-10-28。环境：中文 Windows、Node.js 24.19.0、Go 1.27.3、官方 Komari 1.6.1 / MoeJS 隔离实例。
+
+- TypeScript 严格检查和 30 项插件测试通过，覆盖请求诊断脱敏、4 KiB / 16 条及 16 KiB 总限制、警告通知和重复心跳不写盘。
+- Go 测试及 `go vet` 通过，实际等待 61 秒模拟上传后慢响应，另测请求体发送时间不计入响应头等待；明确未建立连接时可重试，可能送达的上传不重复 PUT。
+- 隔离 WebDAV 覆盖归档落盘但返回 502 / 524、客户端超时后后端继续持锁、两次连续大小核对及中间异常重置、大小缺失、403 / 413 / 423 / 412、取消及 Retry-After。
+- 清单丢失响应后逐项核对；缺失或不一致时失败并保留归档。不 GET 远端归档、不重传或删除未确认写入，大小恢复路径保留警告并跳过旧备份清理。相同大小但内容不同的测试也只显示大小核对警告，不声称远端摘要正确。
+- 从实际下载且校验摘要的 0.2.0 包覆盖升级，官方运行时 19 项检查通过：凭据、密钥、任务、历史、固定目录、启停和测试批准状态保留；真实路由接收新诊断字段。连续至少 90 秒空闲，状态文件内容、mtime、inode 不变。
+- 360px / 1440px、明暗主题的详情诊断区域无横向溢出，关闭操作正常。截图：[桌面暗色](upload-details-1440-dark.png)、[手机暗色](upload-details-360-dark.png)，均使用本地示例数据。
+
+Linux 竞态检测、双架构构建和运行时检查以本版 [CI](https://github.com/DeserveL/komari-webdav-backup/actions/workflows/ci.yml) 与 [Release](https://github.com/DeserveL/komari-webdav-backup/actions/workflows/release.yml) 为准。本轮未连接生产 WebDAV、Cloudflare 或真实 Linux Agent；模拟代理错误不等同于真实 Cloudflare 联调，也不作为网盘持久化或真实恢复验收。
+
 ## 0.2.0 单层任务目录
 
 日期：2026-10-28。环境：中文 Windows、Node.js 24.19.0、Go 1.27.3，以及官方 Komari 1.6.1 / MoeJS 隔离实例。

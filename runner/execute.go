@@ -23,14 +23,25 @@ func execute(ctx context.Context, c Config, stateDir string, emit func(Report)) 
 }
 
 func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Report)) Report {
-	r := Report{RunID: c.RunID, Status: "running", Stage: "检查备份来源", Warnings: []string{}}
-	var d *DAV
+	d, err := newDAV(c)
+	if err != nil {
+		return Report{RunID: c.RunID, Status: "failed", Stage: "检查备份来源", Error: err.Error(), Warnings: []string{}}
+	}
+	defer d.client.CloseIdleConnections()
+	defer d.uploadClient.CloseIdleConnections()
+	return executeWithDAV(ctx, c, stateDir, emit, d)
+}
+
+func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Report), d *DAV) (r Report) {
+	r = Report{RunID: c.RunID, Status: "running", Stage: "检查备份来源", Warnings: []string{}}
+	defer func() { r.RequestDiagnostics = append([]string(nil), d.diagnostics...); r = boundReport(r) }()
 	incompleteFile := ""
 	published := false
+	preserveRemote := false
 	fail := func(err error) Report {
 		r.Status = "failed"
 		r.Error = redact(err.Error(), c.Password)
-		if d != nil && incompleteFile != "" && !published {
+		if incompleteFile != "" && !published && !preserveRemote {
 			cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			if e := d.deleteFile(cleanup, incompleteFile); e != nil {
@@ -40,10 +51,6 @@ func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Rep
 		return r
 	}
 	var err error
-	d, err = newDAV(c)
-	if err != nil {
-		return fail(err)
-	}
 	emit(r)
 	workRoot := filepath.Join(stateDir, "work")
 	if err = os.MkdirAll(workRoot, 0700); err != nil {
@@ -180,6 +187,8 @@ func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Rep
 	emit(r)
 	archiveRemote := path.Join(c.RemoteDir, archiveNameFor(prefix))
 	manifestRemote := path.Join(c.RemoteDir, manifestName(prefix))
+	r.RemotePath = d.target(archiveRemote).String()
+	r.ManifestPath = d.target(manifestRemote).String()
 	if err = d.putNew(ctx, archiveRemote, func() (io.ReadCloser, int64, error) {
 		f, e := os.Open(archive)
 		if e != nil {
@@ -192,14 +201,29 @@ func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Rep
 		}
 		return f, info.Size(), nil
 	}); err != nil {
-		r.Warnings = append(r.Warnings, "upload was not confirmed; inspect any incomplete file at "+archiveRemote)
-		return fail(err)
+		if !isUncertain(err) {
+			return fail(err)
+		}
+		preserveRemote = true
+		r.Stage = "等待确认上传结果"
+		emit(r)
+		r.Stage = "正在核对远端大小"
+		emit(r)
+		original := err
+		if err = d.confirmArchive(ctx, archiveRemote, r.Bytes); err != nil {
+			r.Stage = "上传结果未确认"
+			r.Warnings = append(r.Warnings, "远端文件可能仍在处理，请检查归档位置；本次未删除远端文件")
+			return fail(fmt.Errorf("%v；核对未完成：%w", original, err))
+		}
+		r.Warnings = append([]string{sizeOnlyWarning}, r.Warnings...)
 	}
 	incompleteFile = archiveRemote
 	r.Stage = "核对远端文件大小"
 	emit(r)
-	if err = d.verifySize(ctx, archiveRemote, r.Bytes); err != nil {
-		return fail(err)
+	if !preserveRemote {
+		if err = d.verifySize(ctx, archiveRemote, r.Bytes); err != nil {
+			return fail(err)
+		}
 	}
 	m := Manifest{Owner: owner, Version: 2, RunID: c.RunID, JobID: c.JobID, NodeID: c.NodeID,
 		CompletedAt: time.Now().UTC(), Archive: archiveNameFor(prefix), Size: r.Bytes, SHA256: r.SHA256, Sources: c.Sources, Warnings: r.Warnings}
@@ -207,18 +231,29 @@ func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Rep
 	if err != nil {
 		return fail(err)
 	}
+	r.Stage = "发布完成清单"
+	emit(r)
+	manifestConfirmed := false
 	if err = d.putNew(ctx, manifestRemote, bytesBody(data)); err != nil {
 		// PUT 的响应丢失时，完成清单可能已经写入，保留归档供人工核对。
 		published = true
-		return fail(err)
+		if !isUncertain(err) {
+			return fail(err)
+		}
+		original := err
+		r.Stage = "等待确认完成清单"
+		emit(r)
+		if err = d.confirmManifest(ctx, manifestRemote, m); err != nil {
+			r.Stage = "完成清单发布结果未确认"
+			return fail(fmt.Errorf("%v；核对未完成：%w", original, err))
+		}
+		manifestConfirmed = true
 	}
 	published = true
-	var saved Manifest
-	if err = d.getJSON(ctx, manifestRemote, &saved); err != nil {
-		return fail(err)
-	}
-	if !validManifest(saved, c, manifestName(prefix), time.Now().UTC()) || saved.RunID != c.RunID || saved.SHA256 != r.SHA256 || saved.Size != r.Bytes {
-		return fail(fmt.Errorf("remote manifest verification failed"))
+	if !manifestConfirmed {
+		if err = d.matchManifest(ctx, manifestRemote, m); err != nil {
+			return fail(err)
+		}
 	}
 	r.RemotePath = d.target(archiveRemote).String()
 	r.ManifestPath = d.target(manifestRemote).String()

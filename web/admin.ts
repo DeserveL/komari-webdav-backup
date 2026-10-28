@@ -83,7 +83,9 @@ function detail(r: Item) {
   for (const [label, value] of [['任务',r.jobName],['服务器',nodeName(r.nodeId)],['结果',labels[r.status]],['阶段',r.stage],['加入队列',panelDate(r.createdAt)],['开始时间',panelDate(r.startedAt)],['结束时间',panelDate(r.finishedAt)],['耗时',r.durationSeconds === undefined ? undefined : r.durationSeconds+' 秒'],['归档大小',size(r.bytes)],['归档位置',r.remotePath],['清单位置',r.manifestPath],['SHA-256',r.sha256],['警告',(r.warnings || []).join('\n')],['失败原因',r.error],['通知结果',r.notificationError ? '发送失败：'+r.notificationError : r.notify ? '使用 Komari 通知设置' : '未开启'],['运行编号',r.id]]) {
     if (!value) continue; dl.append(el('dt', String(label)), el('dd', String(value)));
   }
-  const actions = el('div', '', 'actions'); if (r.remotePath) actions.append(button('复制归档位置', () => copyLocation(r.remotePath))); if (r.manifestPath) actions.append(button('复制清单位置', () => copyLocation(r.manifestPath))); $('#detail-content').replaceChildren(dl, actions); $<HTMLDialogElement>('#detail-dialog').showModal();
+  const diagnostics = el('section', '', 'request-diagnostics');
+  if (r.requestDiagnostics?.length) { diagnostics.append(el('h3', '请求诊断'), el('pre', r.requestDiagnostics.join('\n'))); }
+  const actions = el('div', '', 'actions'); if (r.remotePath) actions.append(button('复制归档位置', () => copyLocation(r.remotePath))); if (r.manifestPath) actions.append(button('复制清单位置', () => copyLocation(r.manifestPath))); $('#detail-content').replaceChildren(dl, diagnostics, actions); $<HTMLDialogElement>('#detail-dialog').showModal();
 }
 function fillSettings() {
   const settings = state.data!.settings;

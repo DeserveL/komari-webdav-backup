@@ -19,6 +19,7 @@ export type Run = {
   taskId?: string; startupHash?: string; startupExpires?: number; claimed?: boolean;
   reportHash?: string; reportExpires?: number; config?: RunnerConfig;
   bytes?: number; sha256?: string; remotePath?: string; manifestPath?: string; warnings: string[]; error?: string;
+  requestDiagnostics?: string[];
   notified?: boolean; notificationError?: string; scheduledAt?: number;
   notify?: boolean;
   recoveryHash?: string; recoveryExpires?: number; lastRecoveryAt?: number;
@@ -31,7 +32,7 @@ export type RunnerConfig = {
 };
 export type State = { version: 1 | 2; settings: Settings; jobs: Job[]; runs: Run[] };
 export type NodeInfo = { uuid: string; name: string; os: string; arch: string; online: boolean; version: string };
-export type Report = { runId: string; status: Status; stage: string; bytes?: number; sha256?: string; remotePath?: string; manifestPath?: string; warnings?: string[]; error?: string };
+export type Report = { runId: string; status: Status; stage: string; bytes?: number; sha256?: string; remotePath?: string; manifestPath?: string; warnings?: string[]; error?: string; requestDiagnostics?: string[] };
 export const terminal = (status: Status) => ['success', 'warning', 'failed'].includes(status);
 export const defaults = (): State => ({ version: 2, settings: {
   panelUrl: '', webdavUrl: '', username: '', password: '', baseDir: 'komari-backups', concurrency: 2, timeoutMinutes: 120,

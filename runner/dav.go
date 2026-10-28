@@ -8,13 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,6 +25,9 @@ type DAV struct {
 	base           *url.URL
 	user, password string
 	client         *http.Client
+	uploadClient   *http.Client
+	policy         requestPolicy
+	diagnostics    []string
 }
 type davEntry struct {
 	name       string
@@ -53,11 +59,14 @@ func newDAV(c Config) (*DAV, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DAV{u, c.Username, c.Password, &http.Client{Timeout: time.Duration(c.TimeoutMinutes) * time.Minute,
-		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 15 * time.Second, ResponseHeaderTimeout: 60 * time.Second},
-		// 跨站或同站重定向都显式拒绝，避免凭据外泄或 PUT 被转换为 GET。
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}, nil
+	client := func(wait time.Duration) *http.Client {
+		return &http.Client{Timeout: time.Duration(c.TimeoutMinutes) * time.Minute,
+			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 15 * time.Second, ResponseHeaderTimeout: wait},
+			// 拒绝重定向，避免凭据外泄或 PUT 被转换为 GET。
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	}
+	return &DAV{base: u, user: c.Username, password: c.Password, client: client(time.Minute), uploadClient: client(5 * time.Minute),
+		policy: requestPolicy{retry: []time.Duration{10 * time.Second, 30 * time.Second}, jitter: func() time.Duration { return time.Duration(rand.Int64N(int64(3*time.Second) + 1)) }, interval: 10 * time.Second, confirmation: 5 * time.Minute}}, nil
 }
 
 func (d *DAV) target(relative string) *url.URL {
@@ -75,12 +84,11 @@ func bytesBody(b []byte) bodyFactory {
 
 func (d *DAV) request(ctx context.Context, method, relative string, body bodyFactory, headers map[string]string) (*http.Response, error) {
 	var last error
+	var delay time.Duration
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
+			if err := waitContext(ctx, delay); err != nil {
+				return nil, err
 			}
 		}
 		var reader io.ReadCloser
@@ -92,7 +100,9 @@ func (d *DAV) request(ctx context.Context, method, relative string, body bodyFac
 				return nil, err
 			}
 		}
-		req, err := http.NewRequestWithContext(ctx, method, d.target(relative).String(), reader)
+		var connected atomic.Bool
+		requestCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }})
+		req, err := http.NewRequestWithContext(requestCtx, method, d.target(relative).String(), reader)
 		if err != nil {
 			if reader != nil {
 				_ = reader.Close()
@@ -101,18 +111,50 @@ func (d *DAV) request(ctx context.Context, method, relative string, body bodyFac
 		}
 		req.ContentLength = length
 		req.SetBasicAuth(d.user, d.password)
+		req.Header.Set("Cache-Control", "no-cache, no-store")
+		req.Header.Set("Pragma", "no-cache")
+		req.Header.Set("Accept-Encoding", "identity")
 		for key, value := range headers {
 			req.Header.Set(key, value)
 		}
-		res, err := d.client.Do(req)
+		client := d.client
+		if method == "PUT" {
+			client = d.uploadClient
+		}
+		started := time.Now()
+		res, err := client.Do(req)
 		if err != nil {
-			last = errors.New("WebDAV network request failed: " + redact(err.Error(), d.password))
+			last = errors.New("WebDAV network request failed: " + diagnosticText(err.Error(), d.password))
+			d.record(fmt.Sprintf("%s %s 第 %d 次，耗时 %s：%s", started.UTC().Format(time.RFC3339), method, attempt+1, time.Since(started).Round(time.Millisecond), last))
+			if method == "PUT" && connected.Load() {
+				return nil, &uploadUncertainError{last}
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			delay = d.policy.retry[min(attempt, 1)] + d.policy.jitter()
 			continue
+		}
+		if res.StatusCode >= 400 {
+			ray := res.Header.Get("CF-Ray")
+			if !safeRay.MatchString(ray) {
+				ray = ""
+			}
+			d.record(fmt.Sprintf("%s %s 第 %d 次，耗时 %s：HTTP %d%s", started.UTC().Format(time.RFC3339), method, attempt+1, time.Since(started).Round(time.Millisecond), res.StatusCode, raySuffix(ray)))
+		}
+		if method == "PUT" && (res.StatusCode == 423 || res.StatusCode == 408 || res.StatusCode == 429 || res.StatusCode >= 500) {
+			last = fmt.Errorf("WebDAV PUT HTTP %d", res.StatusCode)
+			closeResponse(res)
+			return nil, &uploadUncertainError{last}
 		}
 		if res.StatusCode != 408 && res.StatusCode != 429 && res.StatusCode < 500 {
 			return res, nil
 		}
 		last = fmt.Errorf("WebDAV %s HTTP %d", method, res.StatusCode)
+		delay = d.policy.retry[min(attempt, 1)] + d.policy.jitter()
+		if value, ok := retryAfter(res.Header.Get("Retry-After"), time.Now()); ok {
+			delay = value
+		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
 		_ = res.Body.Close()
 	}
@@ -186,7 +228,7 @@ func (d *DAV) verifySize(ctx context.Context, name string, expected int64) error
 	}
 	defer closeResponse(res)
 	if res.StatusCode != 200 {
-		return fmt.Errorf("WebDAV size check HTTP %d", res.StatusCode)
+		return &checkStatusError{res.StatusCode}
 	}
 	actual, err := strconv.ParseInt(res.Header.Get("Content-Length"), 10, 64)
 	if err != nil || actual != expected {
@@ -201,7 +243,7 @@ func (d *DAV) getJSON(ctx context.Context, name string, out any) error {
 	}
 	defer closeResponse(res)
 	if res.StatusCode != 200 {
-		return fmt.Errorf("WebDAV GET HTTP %d", res.StatusCode)
+		return &checkStatusError{res.StatusCode}
 	}
 	b, err := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
 	if err != nil || len(b) > 1<<20 {

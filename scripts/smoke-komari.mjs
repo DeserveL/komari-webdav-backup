@@ -89,12 +89,12 @@ try{
   await installPackage('release/komari-webdav-backup-'+version+'.zip');
   const after=(await request(plugin+'/state')).data.data;
   assert.equal(after.version,version);assert.deepEqual(after.runs,before.runs);assert.deepEqual(after.settings,before.settings);
-  for (const old of before.jobs) { const next=after.jobs.find(j=>j.id===old.id); for(const key of ['name','nodeId','sources','excludes','schedule','retentionDays','notify'])assert.deepEqual(next[key],old[key]); assert.equal(next.enabled,false); assert.equal(next.lastTestAt,undefined); assert.ok(next.taskDir); assert.ok(!('remoteDir' in next)); assert.equal(next.savePath,after.settings.baseDir+'/'+next.taskDir); }
+  for (const old of before.jobs) { const next=after.jobs.find(j=>j.id===old.id); for(const key of ['name','nodeId','sources','excludes','schedule','retentionDays','notify'])assert.deepEqual(next[key],old[key]); assert.equal(next.enabled,old.enabled); assert.equal(next.lastTestAt,old.lastTestAt); assert.ok(next.taskDir); assert.ok(!('remoteDir' in next)); assert.equal(next.savePath,after.settings.baseDir+'/'+next.taskDir); }
   assert.deepEqual(JSON.parse(await readFile(join(root,'data/plugin/webdav-backup/runners/manifest.json'),'utf8')),JSON.parse(await readFile('dist/runners/manifest.json','utf8')));
   assert.deepEqual(await readFile(join(dir,'master.key')),keyBefore);
   const stored=JSON.parse(await readFile(join(dir,'state.enc.json'),'utf8')),decrypt=createDecipheriv('aes-256-gcm',keyBefore,Buffer.from(stored.iv,'hex'));decrypt.setAuthTag(Buffer.from(stored.tag,'hex'));
-  const restored=JSON.parse(Buffer.concat([decrypt.update(Buffer.from(stored.data,'hex')),decrypt.final()]).toString());assert.equal(restored.settings.password,'Local-Secret-测试');assert.ok(restored.jobs.every(j=>!j.enabled));
-  checks.push('official ZIP '+(process.env.KOMARI_PREVIOUS_PACKAGE?'upgrade from '+before.version:'reinstall')+' preserves tasks, credentials and history; creates flat task directories and pauses schedules');
+  const restored=JSON.parse(Buffer.concat([decrypt.update(Buffer.from(stored.data,'hex')),decrypt.final()]).toString());assert.equal(restored.settings.password,'Local-Secret-测试');assert.equal(restored.jobs.find(j=>j.id===jobs[0].id).enabled,true);
+  checks.push('official ZIP '+(process.env.KOMARI_PREVIOUS_PACKAGE?'upgrade from '+before.version:'reinstall')+' preserves tasks, credentials, history, directories and enabled schedules');
   // 升级后再走一轮真实路由，覆盖 MoeJS 的 UTF-8 截断及心跳去重。
   const messageCount=messages.length;
   r=await request(plugin+'/run',{jobId:jobs[0].id,mode:'test'});assert.equal(r.status,200);const diagnosticRun=r.data.data.id;
@@ -105,10 +105,11 @@ try{
   const heartbeatFile=join(dir,'state.enc.json'),heartbeatBefore=await readFile(heartbeatFile);
   for(let i=0;i<3;i++){r=await request('/api/clients/webdav-backup/report',{runId:diagnosticRun,status:'running',stage:'检查备份来源'},false,{Authorization:'Bearer '+nextToken});assert.equal(r.status,200);}
   assert.deepEqual(await readFile(heartbeatFile),heartbeatBefore);
-  const diagnosticResult={runId:diagnosticRun,status:'warning',stage:'诊断截断检查',warnings:Array(6).fill('中文'.repeat(2000))};
+  const diagnosticResult={runId:diagnosticRun,status:'warning',stage:'诊断截断检查',warnings:['上传响应异常，仅核对文件大小，未核验远端内容摘要'],requestDiagnostics:Array(30).fill(('PUT HTTP 524 Local-Secret-测试；等待确认上传结果，中文诊断').repeat(30))};
   r=await request('/api/clients/webdav-backup/report',diagnosticResult,false,{Authorization:'Bearer '+nextToken});assert.equal(r.status,200);
-  const diagnostic=(await request(plugin+'/state')).data.data.runs.find(r=>r.id===diagnosticRun),text=diagnostic.warnings.join('');
+  const diagnostic=(await request(plugin+'/state')).data.data.runs.find(r=>r.id===diagnosticRun),text=[...diagnostic.warnings,...(diagnostic.requestDiagnostics||[])].join(''); assert.ok(diagnostic.requestDiagnostics.length>0 && diagnostic.requestDiagnostics.length<=16); assert.ok(!JSON.stringify(diagnostic).includes('Local-Secret-测试')); assert.ok(Buffer.byteLength((diagnostic.requestDiagnostics||[]).join(''))<=4096);
   assert.ok(Buffer.byteLength(text)<=16384);assert.match(text,/已截断/);assert.ok(!text.includes('\ufffd'));checks.push('MoeJS limits UTF-8 diagnostics and does not persist repeated heartbeats');
+  const finalJob=(await request(plugin+'/state')).data.data.jobs.find(j=>j.id===jobs[0].id); await request(plugin+'/jobs',{jobs:[{...finalJob,enabled:false}]});
   ws.close();await once(ws,'close');ws=undefined;
   const idleFile=join(dir,'state.enc.json'),idleBytes=await readFile(idleFile),idleStat=await stat(idleFile,{bigint:true}),idleStart=performance.now();
   // 至少跨过六次真实 cron，期间读取管理状态，不能修改状态文件。

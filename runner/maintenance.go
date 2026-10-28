@@ -17,7 +17,10 @@ const diagnosticLimit = 16 * 1024
 
 func boundReport(r Report) Report {
 	const marker = "…[已截断]"
-	values := append([]string{r.Error}, r.Warnings[:min(100, len(r.Warnings))]...)
+	warningCount := min(100, len(r.Warnings))
+	requests := boundRequests(r.RequestDiagnostics)
+	values := append([]string{r.Error}, r.Warnings[:warningCount]...)
+	values = append(values, requests...)
 	total := 0
 	for _, value := range values {
 		total += len(value)
@@ -51,9 +54,15 @@ func boundReport(r Report) Report {
 	}
 	r.Error = values[0]
 	r.Warnings = []string{}
-	for _, value := range values[1:] {
+	for _, value := range values[1 : 1+warningCount] {
 		if value != "" {
 			r.Warnings = append(r.Warnings, value)
+		}
+	}
+	r.RequestDiagnostics = nil
+	for _, value := range values[1+warningCount:] {
+		if value != "" {
+			r.RequestDiagnostics = append(r.RequestDiagnostics, value)
 		}
 	}
 	return r

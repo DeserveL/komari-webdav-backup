@@ -328,15 +328,6 @@ func TestUploadFailureAndWrongSizeNeverCleanOldBackups(t *testing.T) {
 		})
 	}
 }
-func TestUploadRetriesTransientFailure(t *testing.T) {
-	d, s := fixtureDAV(t)
-	c, _, state := fixtureConfig(t, s.URL)
-	d.retries = 1
-	r := execute(context.Background(), c, state, func(Report) {})
-	if r.Status != "success" || d.retries != 0 {
-		t.Fatalf("%+v", r)
-	}
-}
 func TestTestModeAndRetentionZero(t *testing.T) {
 	d, s := fixtureDAV(t)
 	c, _, state := fixtureConfig(t, s.URL)

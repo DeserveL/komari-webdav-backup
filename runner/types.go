@@ -34,17 +34,18 @@ type Config struct {
 }
 
 type Report struct {
-	RunID        string   `json:"runId"`
-	Status       string   `json:"status"`
-	Stage        string   `json:"stage"`
-	Bytes        int64    `json:"bytes,omitempty"`
-	SHA256       string   `json:"sha256,omitempty"`
-	RemotePath   string   `json:"remotePath,omitempty"`
-	ManifestPath string   `json:"manifestPath,omitempty"`
-	Warnings     []string `json:"warnings"`
-	Error        string   `json:"error,omitempty"`
-	PID          int      `json:"pid,omitempty"`
-	UpdatedAt    string   `json:"updatedAt,omitempty"`
+	RunID              string   `json:"runId"`
+	Status             string   `json:"status"`
+	Stage              string   `json:"stage"`
+	Bytes              int64    `json:"bytes,omitempty"`
+	SHA256             string   `json:"sha256,omitempty"`
+	RemotePath         string   `json:"remotePath,omitempty"`
+	ManifestPath       string   `json:"manifestPath,omitempty"`
+	Warnings           []string `json:"warnings"`
+	RequestDiagnostics []string `json:"requestDiagnostics,omitempty"`
+	Error              string   `json:"error,omitempty"`
+	PID                int      `json:"pid,omitempty"`
+	UpdatedAt          string   `json:"updatedAt,omitempty"`
 }
 
 type Manifest struct {

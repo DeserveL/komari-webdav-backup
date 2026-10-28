@@ -18,9 +18,9 @@ export class BackupService {
     this.lastMaintenance = host.now();
     for (const run of state.runs) {
       if (run.status === 'running' || run.status === 'dispatching') { run.status = 'pending'; run.stage = '等待核对节点执行结果'; this.dirty = true; }
-      const before = JSON.stringify([run.error, run.warnings, run.notificationError]);
+      const before = JSON.stringify([run.error, run.warnings, run.notificationError, run.requestDiagnostics]);
       limitDiagnostics(run);
-      if (before !== JSON.stringify([run.error, run.warnings, run.notificationError])) this.dirty = true;
+      if (before !== JSON.stringify([run.error, run.warnings, run.notificationError, run.requestDiagnostics])) this.dirty = true;
     }
     this.trim(); this.flush();
   }
@@ -30,13 +30,14 @@ export class BackupService {
   private redact(value: unknown): string {
     let s = String(value ?? '').slice(0, 6000);
     for (const secret of [this.state.settings.password, ...this.state.runs.map(r => r.config?.password)].filter(Boolean) as string[]) s = s.split(secret).join('[已隐藏]');
+    s = s.replace(/(https?:\/\/)[^/\s@]+@/g, '$1').replace(/(https?:\/\/[^\s?#"'<>]+)[?#][^\s"'<>]*/g, '$1?[已隐藏]').replace(/Bearer\s+[^\s"'<>]+/gi, 'Bearer [已隐藏]');
     return s;
   }
   view() {
     return { settings: { ...this.state.settings, password: '', passwordSet: !!this.state.settings.password },
       jobs: this.state.jobs.map(j => ({ ...j, savePath: [this.state.settings.baseDir, j.taskDir].filter(Boolean).join('/'), nextRun: new Date(validate.nextSlot(j.schedule, this.host.now())).toISOString() })),
       runs: [...this.state.runs].reverse().slice(0, 200).map(r => this.publicRun(r)),
-      time: this.iso(), timezone: new Date(this.host.now()).toString(), timezoneOffset: new Date(this.host.now()).getTimezoneOffset(), version: '0.2.0' };
+      time: this.iso(), timezone: new Date(this.host.now()).toString(), timezoneOffset: new Date(this.host.now()).getTimezoneOffset(), version: '0.2.1' };
   }
   publicRun(r: Run) {
     const { config, startupHash, startupExpires, reportHash, reportExpires, recoveryHash, recoveryExpires, ...safe } = r;
@@ -187,7 +188,8 @@ export class BackupService {
     if (terminal(r.status)) { this.flush(); return this.publicRun(r); }
     if (!['running', 'success', 'warning', 'failed'].includes(report.status)) throw new Error('执行状态不正确');
     if (typeof report.stage !== 'string' || report.stage.length > 4096 || (report.bytes !== undefined && (!Number.isSafeInteger(report.bytes) || report.bytes < 0)) ||
-      (report.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(report.sha256)) || (report.warnings !== undefined && (!Array.isArray(report.warnings) || report.warnings.some(x => typeof x !== 'string')))) throw new Error('执行结果格式不正确');
+      (report.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(report.sha256)) || (report.warnings !== undefined && (!Array.isArray(report.warnings) || report.warnings.some(x => typeof x !== 'string'))) ||
+      (report.requestDiagnostics !== undefined && (!Array.isArray(report.requestDiagnostics) || report.requestDiagnostics.some(x => typeof x !== 'string')))) throw new Error('执行结果格式不正确');
     if (terminal(report.status)) this.finish(r, report);
     else {
       const stage = this.redact(report.stage);
@@ -202,6 +204,7 @@ export class BackupService {
     r.bytes = data.bytes; r.sha256 = data.sha256; r.remotePath = this.redact(data.remotePath);
     r.manifestPath = data.manifestPath ? this.redact(data.manifestPath) : undefined;
     r.warnings = (data.warnings ?? []).slice(0, 100).map(x => this.redact(x)); r.error = data.error ? this.redact(data.error) : undefined;
+    r.requestDiagnostics = data.requestDiagnostics?.slice(-16).map(x => this.redact(x));
     const j = this.state.jobs.find(j => j.id === r.jobId);
     if (j && r.config && ['success', 'warning'].includes(r.status) && JSON.stringify(r.config) === JSON.stringify(this.config(j, r))) j.lastTestAt = this.iso();
     delete r.config; delete r.startupHash; delete r.recoveryHash;
