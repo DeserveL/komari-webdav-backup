@@ -69,8 +69,9 @@ async function testStorage() {
   const base = new URL(s.webdavUrl+'/');
   const target = (relative: string) => { const u = new URL(base.toString()); u.pathname = base.pathname+relative; return u.toString(); };
   const request = async (method: string, relative: string, body?: string) => {
-    const response = await fetch(target(relative), { method, body, redirect: 'manual', headers: { Authorization: authorization, Depth: '1' } });
-    if (response.status >= 300 && response.status !== 405) throw new Error(`WebDAV ${method} HTTP ${response.status}`);
+    const response = await fetch(target(relative), { method, body, redirect: 'manual', headers: { Authorization: authorization, Depth: '1', 'Cache-Control': 'no-cache, no-store' } });
+    const codes: Record<string, number[]> = { MKCOL: [200, 201, 204, 405], PUT: [200, 201, 204], GET: [200], PROPFIND: [207], DELETE: [200, 204] };
+    if (!codes[method]?.includes(response.status)) throw new Error(`WebDAV ${method} HTTP ${response.status}`);
     return response;
   };
   let current = '';
@@ -78,8 +79,9 @@ async function testStorage() {
   const probe = current+'.probe-panel-'+crypto.randomBytes(12).toString('hex');
   await request('PUT', probe, 'komari-webdav-backup');
   try {
-    const head = await request('HEAD', probe);
-    if (head.headers.get('content-length') !== '20') throw new Error('WebDAV 文件大小核验失败');
+    // 只读取本次生成的 20 字节测试文件，不触发云盘的 HEAD 下载代理。
+    const downloaded = await request('GET', probe);
+    if (await downloaded.text() !== 'komari-webdav-backup') throw new Error('WebDAV 测试文件读取核验失败');
     await request('PROPFIND', current);
   } finally { await request('DELETE', probe); }
   return { message: 'WebDAV 连接及读写检查通过' };

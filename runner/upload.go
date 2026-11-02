@@ -123,10 +123,6 @@ func (d *DAV) recordKey(key, value string, critical bool) {
 }
 
 func (d *DAV) recordRequest(method, relative, value string) {
-	if method == "HEAD" {
-		d.recordCheck(value)
-		return
-	}
 	d.recordKey("request:"+method+":"+relative, value, method == "PUT")
 }
 
@@ -204,7 +200,6 @@ func (d *DAV) confirmArchive(ctx context.Context, name string, size int64) error
 			}
 		} else {
 			consecutive = 0
-			d.recordCheck(err.Error())
 			if isPermanentCheckError(err) {
 				return err
 			}
@@ -214,7 +209,7 @@ func (d *DAV) confirmArchive(ctx context.Context, name string, size int64) error
 
 func isPermanentCheckError(err error) bool {
 	var status *checkStatusError
-	return errors.As(err, &status) && (status.code == 401 || status.code == 403 || status.code == 413)
+	return errors.Is(err, errInvalidMetadata) || (errors.As(err, &status) && (status.code == 401 || status.code == 403 || status.code == 413))
 }
 
 type checkStatusError struct{ code int }

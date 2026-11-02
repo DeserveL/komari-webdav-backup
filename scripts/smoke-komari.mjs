@@ -2,9 +2,10 @@
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {createServer} from 'node:net';
+import {createServer as createHTTPServer} from 'node:http';
 import {mkdir,mkdtemp,cp,readFile,writeFile,open,stat} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
-import {randomBytes,createDecipheriv,createHash} from 'node:crypto';
+import {randomBytes,createDecipheriv,createCipheriv,createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
 const binary=process.env.KOMARI_EXE;
 if(!binary)throw Error('Set KOMARI_EXE to an official Komari 1.6.1 binary');
@@ -14,7 +15,7 @@ await cp('dist',join(root,'data/plugin/webdav-backup'),{recursive:true});
 const socket=createServer();socket.listen(0,'127.0.0.1');await once(socket,'listening');const port=socket.address().port;await new Promise(r=>socket.close(r));
 const base='http://127.0.0.1:'+port;
 const username='local-test',password='LocalA1-'+randomBytes(16).toString('hex'),apiKey=randomBytes(24).toString('hex');
-const checks=[];let child,ws;const log=await open(join(root,'server.log'),'a');
+const checks=[];let child,ws,probeServer;const log=await open(join(root,'server.log'),'a');
 function start(){child=spawn(resolve(binary),['server','-l','127.0.0.1:'+port],{cwd:root,stdio:['ignore',log.fd,log.fd],windowsHide:true});}
 async function stop(){if(!child||child.exitCode!==null)return;const exited=once(child,'exit');child.kill();await exited;}
 async function waitFor(path){const deadline=Date.now()+60000;while(Date.now()<deadline){if(child.exitCode!==null)throw Error('Komari test process exited: '+await readFile(join(root,'server.log'),'utf8'));try{const r=await fetch(base+path);if(r.ok)return;}catch{}await new Promise(r=>setTimeout(r,250));}throw Error('Local Komari startup timed out');}
@@ -116,6 +117,28 @@ try{
   while(performance.now()-idleStart<90000){await new Promise(r=>setTimeout(r,Math.min(15000,90000-(performance.now()-idleStart))));assert.equal((await request(plugin+'/state')).status,200);}
   const idleAfter=await stat(idleFile,{bigint:true});assert.deepEqual(await readFile(idleFile),idleBytes);assert.equal(idleAfter.mtimeNs,idleStat.mtimeNs);assert.equal(idleAfter.ino,idleStat.ino);
   checks.push('90 seconds idle: state content, mtime and inode unchanged across real cron and browser reads');
+  // 仅在隔离状态中注入回环 HTTP 地址，验证 MoeJS 的真实 fetch/text 行为。
+  // 管理界面的生产 HTTPS 校验保持不变，不加入系统证书或访问外部存储。
+  ws?.close();await stop();
+  const probeFiles=new Map(),probeMethods=[];
+  probeServer=createHTTPServer(async(req,res)=>{
+    probeMethods.push(req.method);
+    if(req.method==='MKCOL'){res.writeHead(405);res.end();return;}
+    if(req.method==='PUT'){let body='';for await(const chunk of req)body+=chunk;assert.equal(body,'komari-webdav-backup');probeFiles.set(req.url,body);res.writeHead(201);res.end();return;}
+    if(req.method==='GET'){assert.match(req.url,/\.probe-panel-[a-f0-9]+$/);res.end(probeFiles.get(req.url));return;}
+    if(req.method==='PROPFIND'){res.writeHead(207,{'Content-Type':'application/xml'});res.end('<d:multistatus xmlns:d="DAV:"/>');return;}
+    if(req.method==='DELETE'){probeFiles.delete(req.url);res.writeHead(204);res.end();return;}
+    res.writeHead(500);res.end();
+  });
+  probeServer.listen(0,'127.0.0.1');await once(probeServer,'listening');
+  const idleStored=JSON.parse(idleBytes),plainCipher=createDecipheriv('aes-256-gcm',keyBefore,Buffer.from(idleStored.iv,'hex'));plainCipher.setAuthTag(Buffer.from(idleStored.tag,'hex'));
+  const probeState=JSON.parse(Buffer.concat([plainCipher.update(Buffer.from(idleStored.data,'hex')),plainCipher.final()]).toString());
+  probeState.settings.webdavUrl='http://127.0.0.1:'+probeServer.address().port;
+  const probeIV=randomBytes(12),probeCipher=createCipheriv('aes-256-gcm',keyBefore,probeIV),probeData=probeCipher.update(JSON.stringify(probeState),'utf8','hex')+probeCipher.final('hex');
+  await writeFile(idleFile,JSON.stringify({version:1,iv:probeIV.toString('hex'),tag:probeCipher.getAuthTag().toString('hex'),data:probeData}));
+  start();await waitFor('/api/version');
+  r=await request(plugin+'/test-storage',{});assert.equal(r.data.ok,true,JSON.stringify(r.data));assert.equal(probeFiles.size,0);assert.ok(probeMethods.includes('GET'));assert.ok(!probeMethods.includes('HEAD'));
+  checks.push('MoeJS storage probe reads exact tiny file through fetch.text and deletes it without HEAD');
   const report={runtime:'Komari 1.6.1',host:process.platform,checks,passed:checks.length,limitations:['No production Linux Agent or real cloud WebDAV provider was connected.']};
   await writeFile('.build/komari-smoke-result.json',JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report,null,2));
-}finally{ws?.close();await stop();await log.close();}
+}finally{ws?.close();await stop();if(probeServer)await new Promise(resolve=>probeServer.close(resolve));await log.close();}

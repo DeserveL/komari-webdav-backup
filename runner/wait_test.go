@@ -20,13 +20,13 @@ func TestArchiveWaitUsesOriginalTaskBudget(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	r := executeWithDAV(ctx, c, state, func(Report) {}, d)
 	f.mu.Lock()
-	archivePuts, manifestPuts, heads, gets := f.puts[remoteArchive(c)], f.puts[remoteManifest(c)], f.heads, f.gets
+	archivePuts, manifestPuts, checks, gets := f.puts[remoteArchive(c)], f.puts[remoteManifest(c)], f.checks, f.gets
 	f.mu.Unlock()
 	if r.Status != "failed" || !strings.Contains(r.Error, "任务总时间已用尽") || r.Stage != "上传结果未确认" {
 		t.Fatalf("%+v", r)
 	}
-	if archivePuts != 1 || manifestPuts != 0 || heads != 0 || gets != 0 {
-		t.Fatal("continued after task deadline", archivePuts, manifestPuts, heads, gets)
+	if archivePuts != 1 || manifestPuts != 0 || checks != 0 || gets != 0 {
+		t.Fatal("continued after task deadline", archivePuts, manifestPuts, checks, gets)
 	}
 	for _, name := range f.base.deleted {
 		if !strings.Contains(name, ".probe-") {
@@ -63,9 +63,9 @@ func TestCanceledArchiveDoesNotContinueChecking(t *testing.T) {
 	defer timer.Stop()
 	r := executeWithDAV(ctx, c, state, func(Report) {}, d)
 	f.mu.Lock()
-	archivePuts, manifestPuts, heads := f.puts[remoteArchive(c)], f.puts[remoteManifest(c)], f.heads
+	archivePuts, manifestPuts, checks := f.puts[remoteArchive(c)], f.puts[remoteManifest(c)], f.checks
 	f.mu.Unlock()
-	if r.Status != "failed" || !strings.Contains(r.Error, "任务已取消") || archivePuts != 1 || heads != 0 || manifestPuts != 0 {
+	if r.Status != "failed" || !strings.Contains(r.Error, "任务已取消") || archivePuts != 1 || checks != 0 || manifestPuts != 0 {
 		t.Fatalf("cancellation did not stop upload: %+v", r)
 	}
 }

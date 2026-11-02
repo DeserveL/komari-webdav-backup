@@ -15,14 +15,14 @@ test('发布包、页面和管理接口版本一致',async t=>{
   const f=await fixture(t);
   assert.equal((await f.request('GET','/api/admin/webdav-backup/state')).data.data.version,version);
 });
-async function fixture(t, buffer = Buffer){
+async function fixture(t, buffer = Buffer, fetcher = fetch){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'kwb-plugin-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const storage=path.join(root,'storage');fs.mkdirSync(path.join(root,'runners'));
   const bin=Buffer.from('test binary'),sha256=crypto.createHash('sha256').update(bin).digest('hex');
   fs.writeFileSync(path.join(root,'runners','manifest.json'),JSON.stringify({amd64:{file:'runner',sha256},arm64:{file:'runner',sha256}}));fs.writeFileSync(path.join(root,'runners','runner'),bin);
   const routes=new Map(),calls=[],timers=[];
   const server={route:(method,url,handler)=>routes.set(method+' '+url,handler),cron:(expr,fn)=>timers.push(fn),call:async(method,params)=>{calls.push({method,params});if(method==='admin:listClients')return [{uuid:'node-a',name:'测试节点',os:'Linux'}];if(method==='common:getNodesLatestStatus')return {'node-a':{online:true}};if(method==='admin:exec')return {task_id:'task-a'};return {exit_code:null};}};
-  function context(){return vm.createContext({require:name=>name==='server'?server:({fs,path,crypto}[name]),__storageDir__:storage,__dirname:root,Buffer:buffer,URL,fetch,console:{log(){},error(){}},setTimeout,clearTimeout});}
+  function context(){return vm.createContext({require:name=>name==='server'?server:({fs,path,crypto}[name]),__storageDir__:storage,__dirname:root,Buffer:buffer,URL,fetch:fetcher,console:{log(){},error(){}},setTimeout,clearTimeout});}
   let ctx=context();vm.runInContext(code,ctx);await ctx.load();
   async function request(method,url,body,headers={},roles=['admin']){
     const route=routes.get(method+' '+url.split('?')[0]);assert.ok(route,'route exists: '+url);
@@ -32,6 +32,26 @@ async function fixture(t, buffer = Buffer){
   }
   return {root,storage,routes,calls,timers,request,reload:async()=>{ctx=context();vm.runInContext(code,ctx);await ctx.load();}};
 }
+
+test('公用存储测试仅读取自己的小测试文件，不使用 HEAD 或下载归档',async t=>{
+  const requests=[],files=new Map();let corrupt=false,listStatus=207;
+  const f=await fixture(t,Buffer,async(url,options)=>{
+    const {method,body}=options;requests.push({url,method});
+    assert.match(options.headers['Cache-Control'],/no-cache/);
+    if(method==='MKCOL')return new Response(null,{status:405});
+    if(method==='PUT'){assert.equal(body,'komari-webdav-backup');files.set(url,body);return new Response(null,{status:201});}
+    if(method==='GET'){assert.match(url,/\.probe-panel-[a-f0-9]+$/);return new Response(corrupt?'wrong-content':files.get(url));}
+    if(method==='PROPFIND')return new Response(null,{status:listStatus});
+    if(method==='DELETE'){files.delete(url);return new Response(null,{status:204});}
+    throw Error('unexpected method '+method);
+  });
+  await f.request('POST','/api/admin/webdav-backup/settings',{panelUrl:'https://panel.example',webdavUrl:'https://dav.example',username:'backup',password:'Secret-123',baseDir:'backup',concurrency:2,timeoutMinutes:120});
+  const run=()=>f.request('POST','/api/admin/webdav-backup/test-storage');
+  assert.equal((await run()).data.ok,true);assert.equal(files.size,0);
+  corrupt=true;assert.match((await run()).data.error,/读取核验失败/);assert.equal(files.size,0);
+  corrupt=false;listStatus=405;assert.match((await run()).data.error,/PROPFIND HTTP 405/);assert.equal(files.size,0);
+  assert.ok(!requests.some(r=>r.method==='HEAD'||r.url.endsWith('.tar.gz')));
+});
 test('插件适配器拒绝访客和跨站修改，页面读取密码脱敏',async t=>{
   const f=await fixture(t);
   assert.equal((await f.request('GET','/api/admin/webdav-backup/state',null,{},[])).statusCode,403);

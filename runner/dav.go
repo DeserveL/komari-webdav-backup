@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -155,8 +154,8 @@ func (d *DAV) requestWithClient(ctx context.Context, method, relative string, bo
 			if !safeRay.MatchString(ray) {
 				ray = ""
 			}
-			// 已存在的目录是正常分支；HEAD 的连续核对结果由上层汇总。
-			if !(method == "MKCOL" && res.StatusCode == 405) && method != "HEAD" {
+			// 已存在的目录是正常分支；其余请求异常均保留诊断。
+			if !(method == "MKCOL" && res.StatusCode == 405) {
 				d.recordRequest(method, relative, fmt.Sprintf("%s %s 第 %d 次，耗时 %s：HTTP %d%s", started.UTC().Format(time.RFC3339), method, attempt+1, time.Since(started).Round(time.Millisecond), res.StatusCode, raySuffix(ray)))
 			}
 		}
@@ -240,17 +239,15 @@ func (d *DAV) putFile(ctx context.Context, name, file string) error {
 	})
 }
 func (d *DAV) verifySize(ctx context.Context, name string, expected int64) error {
-	res, err := d.request(ctx, "HEAD", name, nil, nil)
+	actual, err := d.fileSize(ctx, name)
 	if err != nil {
+		d.recordCheck(err.Error())
 		return err
 	}
-	defer closeResponse(res)
-	if res.StatusCode != 200 {
-		return &checkStatusError{res.StatusCode}
-	}
-	actual, err := strconv.ParseInt(res.Header.Get("Content-Length"), 10, 64)
-	if err != nil || actual != expected {
-		return fmt.Errorf("remote archive size mismatch: expected %d", expected)
+	if actual != expected {
+		err = fmt.Errorf("remote archive size mismatch: expected %d, received %d", expected, actual)
+		d.recordCheck(err.Error())
+		return err
 	}
 	return nil
 }

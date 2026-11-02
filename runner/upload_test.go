@@ -22,10 +22,10 @@ type uploadFixture struct {
 	base          *mockDAV
 	mu            sync.Mutex
 	puts          map[string]int
-	gets, heads   int
+	gets, checks  int
 	locked        bool
 	mode          string
-	headsOverride []string
+	sizesOverride []string
 }
 
 func uploadServer(t *testing.T, mode string) (*uploadFixture, *DAV, Config, string) {
@@ -143,21 +143,28 @@ func (f *uploadFixture) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if archive && r.Method == "HEAD" {
+	if archive && r.Method == "PROPFIND" && r.Header.Get("Depth") == "0" {
 		f.mu.Lock()
-		f.heads++
+		f.checks++
 		locked := f.locked
-		if len(f.headsOverride) > 0 {
-			value := f.headsOverride[0]
-			f.headsOverride = f.headsOverride[1:]
+		if len(f.sizesOverride) > 0 {
+			value := f.sizesOverride[0]
+			f.sizesOverride = f.sizesOverride[1:]
 			f.mu.Unlock()
 			if value == "423" {
 				w.WriteHeader(423)
 				return
 			}
+			if value == "404" || value == "500" {
+				code := 404
+				if value == "500" {
+					code = 500
+				}
+				w.WriteHeader(code)
+				return
+			}
 			if value == "wrong" {
-				w.Header().Set("Content-Length", "1")
-				w.WriteHeader(200)
+				writeMetadata(w, r.URL.EscapedPath(), "1")
 				return
 			}
 		} else {
@@ -168,15 +175,67 @@ func (f *uploadFixture) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if f.mode == "missing-size" {
-			w.WriteHeader(200)
+			writeMetadata(w, r.URL.EscapedPath(), "")
 			return
 		}
-		if f.mode == "check-forbidden" {
+		if f.mode == "check-forbidden" || f.mode == "metadata-forbidden" {
 			w.WriteHeader(403)
 			return
 		}
 	}
 	f.base.ServeHTTP(w, r)
+}
+
+func TestSuccessfulPUTWithDelayedMetadata(t *testing.T) {
+	f, d, c, state := uploadServer(t, "normal")
+	_ = d.mkdir(context.Background(), c.RemoteDir)
+	old := addManifest(t, f.base, c, "old", historyAge, true)
+	f.sizesOverride = []string{"404", "ok", "wrong", "ok", "ok"}
+	r := executeWithDAV(context.Background(), c, state, func(Report) {}, d)
+	if r.Status != "warning" || !strings.Contains(strings.Join(r.Warnings, " "), "延迟确认") || strings.Contains(strings.Join(r.Warnings, " "), "上传响应异常") {
+		t.Fatalf("%+v", r)
+	}
+	if f.puts[remoteArchive(c)] != 1 || f.checks < 5 || f.gets != 0 {
+		t.Fatal("unsafe verification", f.puts, f.checks)
+	}
+	if len(f.base.files[old+".tar.gz"]) == 0 || len(f.base.files[remoteManifest(c)]) == 0 {
+		t.Fatal("retention or manifest incorrect")
+	}
+}
+
+func TestSuccessfulPUTMetadataFailurePreservesArchive(t *testing.T) {
+	for _, mode := range []string{"wrong-size", "metadata-forbidden", "metadata-server-error"} {
+		t.Run(mode, func(t *testing.T) {
+			f, d, c, state := uploadServer(t, mode)
+			_ = d.mkdir(context.Background(), c.RemoteDir)
+			old := addManifest(t, f.base, c, "old", historyAge, true)
+			f.base.wrongSize = mode == "wrong-size"
+			if mode == "metadata-server-error" {
+				for i := 0; i < 1000; i++ {
+					f.sizesOverride = append(f.sizesOverride, "500")
+				}
+			}
+			r := executeWithDAV(context.Background(), c, state, func(Report) {}, d)
+			if r.Status != "failed" || r.Stage != "上传结果未确认" || !strings.Contains(r.Error, "上传已响应成功") {
+				t.Fatalf("%+v", r)
+			}
+			if len(f.base.files[remoteArchive(c)]) == 0 || len(f.base.files[old+".tar.gz"]) == 0 || f.puts[remoteArchive(c)] != 1 || f.puts[remoteManifest(c)] != 0 || f.gets != 0 {
+				t.Fatal("failed verification lost or published archive")
+			}
+			for _, name := range f.base.deleted {
+				if !strings.Contains(name, ".probe-") {
+					t.Fatal("deleted remote backup", name)
+				}
+			}
+			diagnostics := strings.Join(r.RequestDiagnostics, " ")
+			if !strings.Contains(diagnostics, "归档已保留") {
+				t.Fatal("missing verification conclusion", diagnostics)
+			}
+			if mode == "metadata-server-error" && (!strings.Contains(diagnostics, "PROPFIND") || !strings.Contains(diagnostics, "500")) {
+				t.Fatal("request error missing", diagnostics)
+			}
+		})
+	}
 }
 
 func TestArchiveResponseLostUsesSizeOnlyAndNeverDeletes(t *testing.T) {
@@ -186,7 +245,7 @@ func TestArchiveResponseLostUsesSizeOnlyAndNeverDeletes(t *testing.T) {
 			_ = d.mkdir(context.Background(), c.RemoteDir)
 			old := addManifest(t, f.base, c, "old", historyAge, true)
 			if mode == "sequence" {
-				f.headsOverride = []string{"ok", "wrong", "ok", "423", "ok", "ok"}
+				f.sizesOverride = []string{"ok", "wrong", "ok", "423", "ok", "ok"}
 			}
 			r := executeWithDAV(context.Background(), c, state, func(Report) {}, d)
 			if r.Status != "warning" || !strings.Contains(strings.Join(r.Warnings, " "), sizeOnlyWarning) {
@@ -206,7 +265,7 @@ func TestArchiveResponseLostUsesSizeOnlyAndNeverDeletes(t *testing.T) {
 			if f.gets != 0 || f.puts[remoteArchive(c)] != 1 {
 				t.Fatal("archive GET or repeated PUT")
 			}
-			if mode == "sequence" && f.heads < 6 {
+			if mode == "sequence" && f.checks < 6 {
 				t.Fatal("nonconsecutive sizes accepted")
 			}
 			if !strings.Contains(strings.Join(r.RequestDiagnostics, " "), "CF-Ray=example-ray") {
@@ -267,7 +326,7 @@ func TestDetachedUploadKeepsLockUntilBackendCompletes(t *testing.T) {
 	f, d, c, state := uploadServer(t, "detached")
 	d.archiveClient.Transport.(*http.Transport).ResponseHeaderTimeout = 15 * time.Millisecond
 	r := executeWithDAV(context.Background(), c, state, func(Report) {}, d)
-	if r.Status != "warning" || f.puts[remoteArchive(c)] != 1 || f.heads < 3 {
+	if r.Status != "warning" || f.puts[remoteArchive(c)] != 1 || f.checks < 3 {
 		t.Fatalf("%+v", r)
 	}
 	if !strings.Contains(strings.Join(r.RequestDiagnostics, " "), "423") {
@@ -302,7 +361,7 @@ func TestRequestRetryAfterAndCancellation(t *testing.T) {
 	if err := d.confirmArchive(ctx, path.Join(c.RemoteDir, "archive.tar.gz"), 1); err == nil {
 		t.Fatal("cancel ignored")
 	}
-	if f.heads != 0 {
+	if f.checks != 0 {
 		t.Fatal("request after cancellation")
 	}
 	var count int

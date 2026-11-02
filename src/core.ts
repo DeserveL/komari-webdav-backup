@@ -37,7 +37,7 @@ export class BackupService {
     return { settings: { ...this.state.settings, password: '', passwordSet: !!this.state.settings.password },
       jobs: this.state.jobs.map(j => ({ ...j, savePath: [this.state.settings.baseDir, j.taskDir].filter(Boolean).join('/'), nextRun: new Date(validate.nextSlot(j.schedule, this.host.now())).toISOString() })),
       runs: [...this.state.runs].reverse().slice(0, 200).map(r => this.publicRun(r)),
-      time: this.iso(), timezone: new Date(this.host.now()).toString(), timezoneOffset: new Date(this.host.now()).getTimezoneOffset(), version: '0.2.2' };
+      time: this.iso(), timezone: new Date(this.host.now()).toString(), timezoneOffset: new Date(this.host.now()).getTimezoneOffset(), version: '0.2.3' };
   }
   publicRun(r: Run) {
     const { config, startupHash, startupExpires, reportHash, reportExpires, recoveryHash, recoveryExpires, ...safe } = r;

@@ -134,6 +134,19 @@ func (d *mockDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		d.deleted = append(d.deleted, p)
 		w.WriteHeader(204)
 	case "PROPFIND":
+		if r.Header.Get("Depth") == "0" {
+			data, ok := d.files[p]
+			if !ok {
+				w.WriteHeader(404)
+				return
+			}
+			size := len(data)
+			if d.wrongSize && strings.HasSuffix(p, ".tar.gz") {
+				size++
+			}
+			writeMetadata(w, r.URL.EscapedPath(), fmt.Sprint(size))
+			return
+		}
 		if !d.dirs[p] {
 			w.WriteHeader(404)
 			return
@@ -315,7 +328,8 @@ func TestUploadFailureAndWrongSizeNeverCleanOldBackups(t *testing.T) {
 			old := addManifest(t, d, c, "run-old", 20*24*time.Hour, true)
 			d.failPUT = kind == "upload"
 			d.wrongSize = kind == "size"
-			r := execute(context.Background(), c, state, func(Report) {})
+			dav.policy = requestPolicy{retry: []time.Duration{time.Millisecond, time.Millisecond}, jitter: func() time.Duration { return 0 }, interval: time.Millisecond, confirmation: 25 * time.Millisecond}
+			r := executeWithDAV(context.Background(), c, state, func(Report) {}, dav)
 			if r.Status != "failed" {
 				t.Fatalf("%+v", r)
 			}

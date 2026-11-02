@@ -36,23 +36,14 @@ func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Rep
 func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Report), d *DAV) (r Report) {
 	r = Report{RunID: c.RunID, Status: "running", Stage: "检查备份来源", Warnings: []string{}}
 	defer func() { r.RequestDiagnostics = append([]string(nil), d.diagnostics...); r = boundReport(r) }()
-	incompleteFile := ""
-	published := false
-	preserveRemote := false
+	sizeConfirmed := false
 	fail := func(err error) Report {
 		if ctx.Err() != nil {
-			preserveRemote = true
 			err = fmt.Errorf("%w；%v", taskContextError(ctx.Err()), err)
 		}
 		r.Status = "failed"
 		r.Error = redact(err.Error(), c.Password)
-		if incompleteFile != "" && !published && !preserveRemote {
-			cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			if e := d.deleteFile(cleanup, incompleteFile); e != nil {
-				r.Warnings = append(r.Warnings, "incomplete remote upload may remain: "+incompleteFile)
-			}
-		}
+		// 校验失败不代表上传失败，保留本次远端文件供核对；仅清理本地临时归档。
 		return r
 	}
 	var err error
@@ -209,7 +200,6 @@ func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Re
 		if !isUncertain(err) {
 			return fail(err)
 		}
-		preserveRemote = true
 		if ctx.Err() != nil {
 			r.Stage = "上传结果未确认"
 			d.recordKey("archive-final", "远端结果未确认：任务已结束，未继续核对或重传", true)
@@ -227,13 +217,26 @@ func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Re
 			return fail(fmt.Errorf("上传请求异常：%v；远端结果未确认：%w", original, err))
 		}
 		r.Warnings = append([]string{sizeOnlyWarning}, r.Warnings...)
+		sizeConfirmed = true
 	}
-	incompleteFile = archiveRemote
 	r.Stage = "核对远端文件大小"
 	emit(r)
-	if !preserveRemote {
+	if !sizeConfirmed {
 		if err = d.verifySize(ctx, archiveRemote, r.Bytes); err != nil {
-			return fail(err)
+			original := err
+			if ctx.Err() == nil && !isPermanentCheckError(err) {
+				r.Stage = "正在核对远端大小"
+				emit(r)
+				err = d.confirmArchive(ctx, archiveRemote, r.Bytes)
+			}
+			if err != nil {
+				r.Stage = "上传结果未确认"
+				r.Warnings = append(r.Warnings, "远端归档已保留，大小未确认；请检查归档位置，本次未发布完成清单")
+				d.recordKey("archive-final", "远端大小未确认，归档已保留："+err.Error(), true)
+				return fail(fmt.Errorf("上传已响应成功，但远端大小未确认：%v；%w", original, err))
+			}
+			r.Warnings = append([]string{"上传已响应成功，远端大小延迟确认；未核验远端内容摘要，本次不清理过期备份"}, r.Warnings...)
+			d.recordKey("archive-final", "延迟查询后连续两次远端大小一致，带警告完成，跳过过期清理", true)
 		}
 	}
 	m := Manifest{Owner: owner, Version: 2, RunID: c.RunID, JobID: c.JobID, NodeID: c.NodeID,
@@ -247,7 +250,6 @@ func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Re
 	manifestConfirmed := false
 	if err = d.putNew(ctx, manifestRemote, bytesBody(data)); err != nil {
 		// PUT 的响应丢失时，完成清单可能已经写入，保留归档供人工核对。
-		published = true
 		if !isUncertain(err) {
 			return fail(err)
 		}
@@ -263,7 +265,6 @@ func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Re
 		}
 		manifestConfirmed = true
 	}
-	published = true
 	if !manifestConfirmed {
 		if err = d.matchManifest(ctx, manifestRemote, m); err != nil {
 			return fail(err)

@@ -193,15 +193,15 @@ func (d *DAV) deleteConfirmed(ctx context.Context, name string) error {
 	if code != 200 && code != 202 && code != 204 && code != 404 {
 		return fmt.Errorf("WebDAV DELETE HTTP %d", code)
 	}
-	res, err = d.request(ctx, "HEAD", name, nil, nil)
+	_, err = d.fileSize(ctx, name)
+	var status *checkStatusError
+	if errors.As(err, &status) && status.code == 404 {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	defer closeResponse(res)
-	if res.StatusCode != 404 {
-		return errors.New("remote file deletion not confirmed")
-	}
-	return nil
+	return errors.New("remote file deletion not confirmed")
 }
 
 func (d *DAV) putNew(ctx context.Context, name string, body bodyFactory) error {
