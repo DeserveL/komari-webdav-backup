@@ -88,7 +88,74 @@ func boundRequests(values []string) []string {
 	return result
 }
 func (d *DAV) record(value string) {
-	d.diagnostics = boundRequests(append(d.diagnostics, diagnosticText(value, d.password)))
+	d.recordKey("event:"+value, value, false)
+}
+
+// 关键写入异常不会被重复的读取失败挤出；内部索引与输出一起保持有界。
+func (d *DAV) recordKey(key, value string, critical bool) {
+	value = limitedText(diagnosticText(value, d.password), 256)
+	if d.criticalKeys == nil {
+		d.criticalKeys = map[string]bool{}
+	}
+	for i, existing := range d.diagnosticKeys {
+		if existing == key {
+			d.diagnostics[i] = value
+			return
+		}
+	}
+	d.diagnosticKeys = append(d.diagnosticKeys, key)
+	d.diagnostics = append(d.diagnostics, value)
+	d.criticalKeys[key] = critical
+	if len(d.diagnostics) <= 16 {
+		return
+	}
+	remove := 1
+	for i, candidate := range d.diagnosticKeys {
+		if !d.criticalKeys[candidate] {
+			remove = i
+			break
+		}
+	}
+	delete(d.criticalKeys, d.diagnosticKeys[remove])
+	delete(d.checks, d.diagnosticKeys[remove])
+	d.diagnosticKeys = append(d.diagnosticKeys[:remove], d.diagnosticKeys[remove+1:]...)
+	d.diagnostics = append(d.diagnostics[:remove], d.diagnostics[remove+1:]...)
+}
+
+func (d *DAV) recordRequest(method, relative, value string) {
+	if method == "HEAD" {
+		d.recordCheck(value)
+		return
+	}
+	d.recordKey("request:"+method+":"+relative, value, method == "PUT")
+}
+
+type checkSummary struct {
+	count       int
+	first, last time.Time
+}
+
+func (d *DAV) recordCheck(value string) {
+	value = limitedText(diagnosticText(value, d.password), 120)
+	key := "check:" + value
+	if d.checks == nil {
+		d.checks = map[string]*checkSummary{}
+	}
+	summary := d.checks[key]
+	if summary == nil {
+		summary = &checkSummary{first: time.Now().UTC()}
+		d.checks[key] = summary
+	}
+	summary.count++
+	summary.last = time.Now().UTC()
+	d.recordKey(key, fmt.Sprintf("远端大小尚未确认：%s；累计 %d 次，首次 %s，末次 %s", value, summary.count, summary.first.Format(time.RFC3339), summary.last.Format(time.RFC3339)), false)
+}
+
+func taskContextError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("任务总时间已用尽：%w", err)
+	}
+	return fmt.Errorf("任务已取消：%w", err)
 }
 
 func waitContext(ctx context.Context, delay time.Duration) error {
@@ -118,12 +185,16 @@ const sizeOnlyWarning = "上传响应异常，仅核对文件大小，未核验�
 
 // 只查元数据，连续两次大小一致也不宣称远端内容通过摘要校验。
 func (d *DAV) confirmArchive(ctx context.Context, name string, size int64) error {
+	taskCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, d.policy.confirmation)
 	defer cancel()
 	consecutive := 0
 	for {
 		if err := waitContext(ctx, d.policy.interval); err != nil {
-			return fmt.Errorf("上传结果未确认：%w", err)
+			if taskCtx.Err() != nil {
+				return taskContextError(taskCtx.Err())
+			}
+			return fmt.Errorf("上传结果核对时间已用尽：%w", err)
 		}
 		if err := d.verifySize(ctx, name, size); err == nil {
 			consecutive++
@@ -133,7 +204,7 @@ func (d *DAV) confirmArchive(ctx context.Context, name string, size int64) error
 			}
 		} else {
 			consecutive = 0
-			d.record("远端大小尚未确认：" + err.Error())
+			d.recordCheck(err.Error())
 			if isPermanentCheckError(err) {
 				return err
 			}

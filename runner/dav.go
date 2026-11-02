@@ -26,8 +26,12 @@ type DAV struct {
 	user, password string
 	client         *http.Client
 	uploadClient   *http.Client
+	archiveClient  *http.Client
 	policy         requestPolicy
 	diagnostics    []string
+	diagnosticKeys []string
+	criticalKeys   map[string]bool
+	checks         map[string]*checkSummary
 }
 type davEntry struct {
 	name       string
@@ -65,7 +69,8 @@ func newDAV(c Config) (*DAV, error) {
 			// 拒绝重定向，避免凭据外泄或 PUT 被转换为 GET。
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
-	return &DAV{base: u, user: c.Username, password: c.Password, client: client(time.Minute), uploadClient: client(5 * time.Minute),
+	// 云盘网关可能在完整接收归档后才转存；归档等待只受原任务上下文限制。
+	return &DAV{base: u, user: c.Username, password: c.Password, client: client(time.Minute), uploadClient: client(5 * time.Minute), archiveClient: client(0),
 		policy: requestPolicy{retry: []time.Duration{10 * time.Second, 30 * time.Second}, jitter: func() time.Duration { return time.Duration(rand.Int64N(int64(3*time.Second) + 1)) }, interval: 10 * time.Second, confirmation: 5 * time.Minute}}, nil
 }
 
@@ -83,9 +88,20 @@ func bytesBody(b []byte) bodyFactory {
 }
 
 func (d *DAV) request(ctx context.Context, method, relative string, body bodyFactory, headers map[string]string) (*http.Response, error) {
+	client := d.client
+	if method == "PUT" {
+		client = d.uploadClient
+	}
+	return d.requestWithClient(ctx, method, relative, body, headers, client)
+}
+
+func (d *DAV) requestWithClient(ctx context.Context, method, relative string, body bodyFactory, headers map[string]string, client *http.Client) (*http.Response, error) {
 	var last error
 	var delay time.Duration
 	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if attempt > 0 {
 			if err := waitContext(ctx, delay); err != nil {
 				return nil, err
@@ -117,20 +133,19 @@ func (d *DAV) request(ctx context.Context, method, relative string, body bodyFac
 		for key, value := range headers {
 			req.Header.Set(key, value)
 		}
-		client := d.client
-		if method == "PUT" {
-			client = d.uploadClient
-		}
 		started := time.Now()
 		res, err := client.Do(req)
 		if err != nil {
 			last = errors.New("WebDAV network request failed: " + diagnosticText(err.Error(), d.password))
-			d.record(fmt.Sprintf("%s %s 第 %d 次，耗时 %s：%s", started.UTC().Format(time.RFC3339), method, attempt+1, time.Since(started).Round(time.Millisecond), last))
+			if ctx.Err() != nil {
+				last = fmt.Errorf("%w；请求原因：%v", ctx.Err(), last)
+			}
+			d.recordRequest(method, relative, fmt.Sprintf("%s %s 第 %d 次，耗时 %s：%s", started.UTC().Format(time.RFC3339), method, attempt+1, time.Since(started).Round(time.Millisecond), last))
 			if method == "PUT" && connected.Load() {
 				return nil, &uploadUncertainError{last}
 			}
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, last
 			}
 			delay = d.policy.retry[min(attempt, 1)] + d.policy.jitter()
 			continue
@@ -140,7 +155,10 @@ func (d *DAV) request(ctx context.Context, method, relative string, body bodyFac
 			if !safeRay.MatchString(ray) {
 				ray = ""
 			}
-			d.record(fmt.Sprintf("%s %s 第 %d 次，耗时 %s：HTTP %d%s", started.UTC().Format(time.RFC3339), method, attempt+1, time.Since(started).Round(time.Millisecond), res.StatusCode, raySuffix(ray)))
+			// 已存在的目录是正常分支；HEAD 的连续核对结果由上层汇总。
+			if !(method == "MKCOL" && res.StatusCode == 405) && method != "HEAD" {
+				d.recordRequest(method, relative, fmt.Sprintf("%s %s 第 %d 次，耗时 %s：HTTP %d%s", started.UTC().Format(time.RFC3339), method, attempt+1, time.Since(started).Round(time.Millisecond), res.StatusCode, raySuffix(ray)))
+			}
 		}
 		if method == "PUT" && (res.StatusCode == 423 || res.StatusCode == 408 || res.StatusCode == 429 || res.StatusCode >= 500) {
 			last = fmt.Errorf("WebDAV PUT HTTP %d", res.StatusCode)

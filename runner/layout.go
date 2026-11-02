@@ -211,3 +211,11 @@ func (d *DAV) putNew(ctx context.Context, name string, body bodyFactory) error {
 	}
 	return httpOK(res, 200, 201, 204)
 }
+
+func (d *DAV) putArchive(ctx context.Context, name string, body bodyFactory) error {
+	res, err := d.requestWithClient(ctx, "PUT", name, body, map[string]string{"Content-Type": "application/octet-stream", "If-None-Match": "*"}, d.archiveClient)
+	if err != nil {
+		return err
+	}
+	return httpOK(res, 200, 201, 204)
+}

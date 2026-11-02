@@ -29,6 +29,7 @@ func executeLocked(ctx context.Context, c Config, stateDir string, emit func(Rep
 	}
 	defer d.client.CloseIdleConnections()
 	defer d.uploadClient.CloseIdleConnections()
+	defer d.archiveClient.CloseIdleConnections()
 	return executeWithDAV(ctx, c, stateDir, emit, d)
 }
 
@@ -39,6 +40,10 @@ func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Re
 	published := false
 	preserveRemote := false
 	fail := func(err error) Report {
+		if ctx.Err() != nil {
+			preserveRemote = true
+			err = fmt.Errorf("%w；%v", taskContextError(ctx.Err()), err)
+		}
 		r.Status = "failed"
 		r.Error = redact(err.Error(), c.Password)
 		if incompleteFile != "" && !published && !preserveRemote {
@@ -189,7 +194,7 @@ func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Re
 	manifestRemote := path.Join(c.RemoteDir, manifestName(prefix))
 	r.RemotePath = d.target(archiveRemote).String()
 	r.ManifestPath = d.target(manifestRemote).String()
-	if err = d.putNew(ctx, archiveRemote, func() (io.ReadCloser, int64, error) {
+	if err = d.putArchive(ctx, archiveRemote, func() (io.ReadCloser, int64, error) {
 		f, e := os.Open(archive)
 		if e != nil {
 			return nil, 0, e
@@ -205,6 +210,11 @@ func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Re
 			return fail(err)
 		}
 		preserveRemote = true
+		if ctx.Err() != nil {
+			r.Stage = "上传结果未确认"
+			d.recordKey("archive-final", "远端结果未确认：任务已结束，未继续核对或重传", true)
+			return fail(fmt.Errorf("上传请求异常：%w；远端结果未确认，未删除远端文件", err))
+		}
 		r.Stage = "等待确认上传结果"
 		emit(r)
 		r.Stage = "正在核对远端大小"
@@ -213,7 +223,8 @@ func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Re
 		if err = d.confirmArchive(ctx, archiveRemote, r.Bytes); err != nil {
 			r.Stage = "上传结果未确认"
 			r.Warnings = append(r.Warnings, "远端文件可能仍在处理，请检查归档位置；本次未删除远端文件")
-			return fail(fmt.Errorf("%v；核对未完成：%w", original, err))
+			d.recordKey("archive-final", "远端结果未确认："+err.Error(), true)
+			return fail(fmt.Errorf("上传请求异常：%v；远端结果未确认：%w", original, err))
 		}
 		r.Warnings = append([]string{sizeOnlyWarning}, r.Warnings...)
 	}
@@ -241,6 +252,9 @@ func executeWithDAV(ctx context.Context, c Config, stateDir string, emit func(Re
 			return fail(err)
 		}
 		original := err
+		if ctx.Err() != nil {
+			return fail(fmt.Errorf("完成清单请求异常：%w；远端结果未确认，未删除远端文件", err))
+		}
 		r.Stage = "等待确认完成清单"
 		emit(r)
 		if err = d.confirmManifest(ctx, manifestRemote, m); err != nil {

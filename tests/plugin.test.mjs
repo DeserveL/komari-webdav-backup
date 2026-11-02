@@ -7,6 +7,14 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 const code=fs.readFileSync('dist/script.js','utf8');
+
+test('发布包、页面和管理接口版本一致',async t=>{
+  const version=JSON.parse(fs.readFileSync('package.json','utf8')).version;
+  assert.equal(JSON.parse(fs.readFileSync('komari-plugin.json','utf8')).version,version);
+  assert.ok(fs.readFileSync('web/admin.html','utf8').includes('v'+version));
+  const f=await fixture(t);
+  assert.equal((await f.request('GET','/api/admin/webdav-backup/state')).data.data.version,version);
+});
 async function fixture(t, buffer = Buffer){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'kwb-plugin-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const storage=path.join(root,'storage');fs.mkdirSync(path.join(root,'runners'));

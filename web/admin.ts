@@ -1,22 +1,41 @@
 export {};
 import { directoryLabel } from '../src/layout';
+import { feedback, clearFeedback, copyText } from './feedback';
 const API = '/api/admin/webdav-backup';
 type Item = Record<string, any>;
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
-const state: { data?: Item; nodes: Item[]; editId?: string; refreshing: boolean } = { nodes: [], refreshing: false };
+const state: { data?: Item; nodes: Item[]; editId?: string } = { nodes: [] };
 const labels: Record<string, string> = { queued: '等待执行', dispatching: '正在启动', running: '执行中', pending: '结果待确认', success: '成功', warning: '有警告', failed: '失败' };
 const settingsForm = $<HTMLFormElement>('#settings-form'), jobForm = $<HTMLFormElement>('#job-form');
 function field(form: HTMLFormElement, name: string) { return form.elements.namedItem(name) as HTMLInputElement; }
 function el(tag: string, text = '', className = '') { const node = document.createElement(tag); node.textContent = text; node.className = className; return node; }
-function message(text: string, error = false) { const node = $('#message'); node.textContent = text; node.className = 'message'+(error ? ' error' : ''); node.hidden = false; }
+const inFlight = new Set<string>();
 async function request(path: string, body?: unknown): Promise<any> {
   const response = await fetch(API+path, { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', headers: body === undefined ? {} : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await response.json();
   if (!response.ok || !data.ok) throw new Error(data.error || '请求未完成，请稍后重试');
   return data.data;
 }
-async function action(button: HTMLButtonElement, fn: () => Promise<void>) { button.disabled = true; try { await fn(); } catch (e) { message(e instanceof Error ? e.message : '操作未完成', true); } finally { button.disabled = false; } }
-function button(text: string, fn: (button: HTMLButtonElement) => Promise<void> | void, danger = false) { const b = el('button', text, 'link-button'+(danger ? ' danger' : '')) as HTMLButtonElement; b.type = 'button'; b.onclick = () => { void action(b, async () => { await fn(b); }); }; return b; }
+async function action(button: HTMLButtonElement, fn: () => Promise<void | string>) {
+  const key = button.dataset.operation || button.id || button.textContent!;
+  if (inFlight.has(key)) return;
+  inFlight.add(key); button.disabled = true;
+  const label = button.textContent!;
+  button.textContent = label.includes('保存') ? '保存中…' : label.includes('测试') ? '正在测试连接…' : `正在${label}…`;
+  feedback(key, button.textContent, 'progress');
+  try { const result = await fn(); if (result) feedback(key, result); else clearFeedback(key); }
+  catch (e) { feedback(key, e instanceof Error ? e.message : '操作未完成', 'error'); }
+  finally {
+    inFlight.delete(key); button.disabled = false; button.textContent = label;
+    // 列表刷新可能替换了触发操作的按钮，需要同时释放新渲染的同一操作。
+    document.querySelectorAll<HTMLButtonElement>('[data-operation]').forEach(b => { if (b.dataset.operation === key) b.disabled = false; });
+  }
+}
+function button(text: string, fn: (button: HTMLButtonElement) => Promise<void | string> | void | string, danger = false, key = text) {
+  const b = el('button', text, 'link-button'+(danger ? ' danger' : '')) as HTMLButtonElement;
+  b.type = 'button'; b.dataset.operation = key; b.disabled = inFlight.has(key);
+  b.onclick = () => { void action(b, async () => fn(b)); }; return b;
+}
 function tab(name: string) { document.querySelectorAll<HTMLElement>('[id^="tab-"]').forEach(x => x.hidden = x.id !== 'tab-'+name); document.querySelectorAll<HTMLElement>('[data-tab]').forEach(x => x.classList.toggle('selected', x.dataset.tab === name)); }
 function panelDate(value?: string) {
   if (!value) return '—';
@@ -26,13 +45,7 @@ function panelDate(value?: string) {
 function size(n: number) { if (!n) return '—'; return n >= 1024**3 ? (n/1024**3).toFixed(2)+' GB' : n >= 1024**2 ? (n/1024**2).toFixed(1)+' MB' : (n/1024).toFixed(1)+' KB'; }
 function nodeName(id: string) { return state.nodes.find(n => n.uuid === id)?.name || id; }
 async function copyLocation(value: string) {
-  if (navigator.clipboard) await navigator.clipboard.writeText(value);
-  else {
-    const input = document.createElement('textarea'); input.value = value; document.body.append(input); input.select();
-    const copied = document.execCommand('copy'); input.remove();
-    if (!copied) throw new Error('请选中保存位置后复制');
-  }
-  message('保存位置已复制');
+  await copyText(value); return '保存位置已复制';
 }
 function previewLocations() {
   const container = $('#save-preview'); container.replaceChildren();
@@ -63,10 +76,10 @@ function render() {
     when.append(el('span', j.enabled ? '下次 '+panelDate(j.nextRun) : '保留 '+(j.retentionDays ? j.retentionDays+' 天' : '全部备份'), 'sub')); row.append(when);
     const status = el('td'); status.append(el('span', j.enabled ? '已启用' : '已暂停', 'badge'+(j.enabled ? ' success' : ''))); row.append(status);
     const actions = el('div', '', 'actions');
-    actions.append(button('立即备份', async () => { await request('/run', { jobId: j.id }); message('备份已加入队列'); tab('runs'); await refresh(); }),
-      button('测试连接', async () => { await request('/run', { jobId: j.id, mode: 'test' }); message('节点连接测试已加入队列'); tab('runs'); await refresh(); }),
-      button(j.enabled ? '暂停' : '启用', async () => { await request('/jobs', { jobs: [{ ...j, enabled: !j.enabled }] }); await refresh(); }),
-      button('复制保存位置', () => copyLocation(j.savePath)), button('编辑', () => openJob(j)), button('删除', async () => { if (confirm(`删除“${j.name}”？已有远端备份会保留。`)) { await request('/delete-job', { id: j.id }); await refresh(); } }, true));
+    actions.append(button('立即备份', async () => { await request('/run', { jobId: j.id }); tab('runs'); await refresh(); return '备份已加入队列'; }, false, 'run:'+j.id),
+      button('测试连接', async () => { await request('/run', { jobId: j.id, mode: 'test' }); tab('runs'); await refresh(); return '节点连接测试已加入队列'; }, false, 'test:'+j.id),
+      button(j.enabled ? '暂停' : '启用', async () => { await request('/jobs', { jobs: [{ ...j, enabled: !j.enabled }] }); await refresh(); return j.enabled ? '定时备份已暂停' : '定时备份已启用'; }, false, 'toggle:'+j.id),
+      button('复制保存位置', () => copyLocation(j.savePath), false, 'copy:'+j.id), button('编辑', () => openJob(j)), button('删除', async () => { if (confirm(`删除“${j.name}”？已有远端备份会保留。`)) { await request('/delete-job', { id: j.id }); await refresh(); return '备份任务已删除，远端文件已保留'; } }, true, 'delete:'+j.id));
     const cell = el('td'); cell.append(actions); row.append(cell); jobs.append(row);
   }
   const runs = $('#runs-body'); runs.replaceChildren(); $('#runs-empty').hidden = data.runs.length > 0;
@@ -74,7 +87,7 @@ function render() {
     const row = el('tr'), name = el('td', r.jobName); name.append(el('span', panelDate(r.createdAt), 'sub')); row.append(name, el('td', r.mode === 'test' ? '连接测试' : '文件备份'));
     const result = el('td'); result.append(el('span', labels[r.status] || r.status, 'badge '+r.status)); row.append(result, el('td', r.stage), el('td', size(r.bytes)));
     const cell = el('td'), actions = el('div', '', 'actions'); actions.append(button('详情', () => detail(r)));
-    if (r.status === 'pending') actions.append(button('核对状态', async () => { await request('/recover', { runId: r.id }); message('已请求核对节点状态'); await refresh(); }));
+    if (r.status === 'pending') actions.append(button('核对状态', async () => { await request('/recover', { runId: r.id }); await refresh(); return '已请求核对节点状态'; }, false, 'recover:'+r.id));
     cell.append(actions); row.append(cell); runs.append(row);
   }
 }
@@ -111,27 +124,30 @@ function openJob(job?: Item) {
   $('#weekday-label').hidden = field(jobForm, 'kind').value !== 'weekly';
   previewLocations();
   $('#copy-save-path').hidden = !job;
-  $('#copy-save-path').onclick = () => { if (job) void action($<HTMLButtonElement>('#copy-save-path'), async () => { await copyLocation(job.savePath); }); };
+  $('#copy-save-path').onclick = () => { if (job) void action($<HTMLButtonElement>('#copy-save-path'), async () => { return await copyLocation(job.savePath); }); };
   $<HTMLDialogElement>('#job-dialog').showModal();
 }
-async function refresh() {
-  if (state.refreshing) return;
-  state.refreshing = true;
-  try { const [data, nodes] = await Promise.all([request('/state'), request('/nodes')]); state.data = data; state.nodes = nodes; render(); }
-  finally { state.refreshing = false; }
+let refreshTask: Promise<void> | undefined;
+function refresh(): Promise<void> {
+  if (refreshTask) return refreshTask;
+  refreshTask = Promise.all([request('/state'), request('/nodes')]).then(([data, nodes]) => {
+    state.data = data; state.nodes = nodes; render(); clearFeedback('state-read');
+  }).finally(() => { refreshTask = undefined; });
+  return refreshTask;
 }
+
 document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b => b.onclick = () => tab(b.dataset.tab!));
 document.querySelectorAll<HTMLButtonElement>('[data-close]').forEach(b => b.onclick = () => $<HTMLDialogElement>('#'+b.dataset.close).close());
 $('#new-job').onclick = () => openJob(); $('#empty-settings').onclick = () => tab('settings');
 field(jobForm, 'kind').onchange = () => { $('#weekday-label').hidden = field(jobForm, 'kind').value !== 'weekly'; };
 jobForm.addEventListener('input', previewLocations);
 jobForm.addEventListener('change', previewLocations);
-$('#refresh').onclick = () => { void action($<HTMLButtonElement>('#refresh'), refresh); };
+$('#refresh').onclick = () => { void action($<HTMLButtonElement>('#refresh'), async () => { await refresh(); return '备份状态已刷新'; }); };
 settingsForm.onsubmit = event => { event.preventDefault(); void action(settingsForm.querySelector('button[type=submit]')!, async () => {
   const data = Object.fromEntries(new FormData(settingsForm)); data.concurrency = String(Number(data.concurrency)); data.timeoutMinutes = String(Number(data.timeoutMinutes));
-  await request('/settings', data); message('公用存储配置已保存，请测试连接'); await refresh(); fillSettings();
+  await request('/settings', data); await refresh(); fillSettings(); return '公用存储配置已保存，请测试连接';
 }); };
-$('#test-storage').onclick = () => { void action($<HTMLButtonElement>('#test-storage'), async () => { const result = await request('/test-storage', {}); message(result.message); }); };
+$('#test-storage').onclick = () => { void action($<HTMLButtonElement>('#test-storage'), async () => { const result = await request('/test-storage', {}); return result.message; }); };
 jobForm.onsubmit = event => { event.preventDefault(); void action(jobForm.querySelector('button[type=submit]')!, async () => {
   const selected = [...jobForm.querySelectorAll<HTMLInputElement>('input[name=node]:checked')].map(n => n.value);
   if (!selected.length) throw new Error('请至少选择一台服务器');
@@ -139,7 +155,7 @@ jobForm.onsubmit = event => { event.preventDefault(); void action(jobForm.queryS
   const lines = (name: string) => field(jobForm, name).value.split('\n').map(x => x.trim()).filter(Boolean);
   await request('/jobs', { jobs: selected.map(nodeId => ({ id: state.editId, nodeId, name: field(jobForm,'name').value, sources: lines('sources'), excludes: lines('excludes'),
     schedule: { kind: field(jobForm,'kind').value, time: field(jobForm,'time').value, weekday: Number(field(jobForm,'weekday').value) }, retentionDays: Number(field(jobForm,'retentionDays').value), notify: field(jobForm,'notify').checked, enabled: old?.enabled ?? false })) });
-  $<HTMLDialogElement>('#job-dialog').close(); message('备份任务已保存'); await refresh();
+  $<HTMLDialogElement>('#job-dialog').close(); await refresh(); return '备份任务已保存';
 }); };
-void refresh().then(fillSettings).catch(e => message(e.message, true));
-setInterval(() => { if (!document.hidden) void refresh().catch(() => message('暂时无法读取备份状态，稍后会自动重试', true)); }, 15000);
+void refresh().then(fillSettings).catch(e => feedback('state-read', e.message, 'error'));
+setInterval(() => { if (!document.hidden) void refresh().catch(() => feedback('state-read', '暂时无法读取备份状态，稍后会自动重试', 'error')); }, 15000);

@@ -35,12 +35,17 @@ func uploadServer(t *testing.T, mode string) (*uploadFixture, *DAV, Config, stri
 	s := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(s.Close)
 	c, _, state := fixtureConfig(t, s.URL)
+	c.TimeoutMinutes = 120
 	d, err := newDAV(c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	d.policy = requestPolicy{retry: []time.Duration{time.Millisecond, time.Millisecond}, jitter: func() time.Duration { return 0 }, interval: 3 * time.Millisecond, confirmation: 200 * time.Millisecond}
-	t.Cleanup(func() { d.client.CloseIdleConnections(); d.uploadClient.CloseIdleConnections() })
+	t.Cleanup(func() {
+		d.client.CloseIdleConnections()
+		d.uploadClient.CloseIdleConnections()
+		d.archiveClient.CloseIdleConnections()
+	})
 	return f, d, c, state
 }
 
@@ -63,7 +68,12 @@ func (f *uploadFixture) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(423)
 			return
 		}
-		if archive && (f.mode == "slow" || f.mode == "detached") {
+		if archive && f.mode == "cancel" {
+			_, _ = io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+			return
+		}
+		if archive && (f.mode == "slow" || f.mode == "detached" || f.mode == "long") {
 			f.mu.Lock()
 			f.locked = true
 			f.mu.Unlock()
@@ -71,6 +81,9 @@ func (f *uploadFixture) serve(w http.ResponseWriter, r *http.Request) {
 			delay := 70 * time.Millisecond
 			if f.mode == "slow" {
 				delay = 61 * time.Second
+			}
+			if f.mode == "long" {
+				delay = 310 * time.Second
 			}
 			time.Sleep(delay)
 			f.base.mu.Lock()
@@ -252,7 +265,7 @@ func TestManifestResponseLostMatchesAllFields(t *testing.T) {
 
 func TestDetachedUploadKeepsLockUntilBackendCompletes(t *testing.T) {
 	f, d, c, state := uploadServer(t, "detached")
-	d.uploadClient.Transport.(*http.Transport).ResponseHeaderTimeout = 15 * time.Millisecond
+	d.archiveClient.Transport.(*http.Transport).ResponseHeaderTimeout = 15 * time.Millisecond
 	r := executeWithDAV(context.Background(), c, state, func(Report) {}, d)
 	if r.Status != "warning" || f.puts[remoteArchive(c)] != 1 || f.heads < 3 {
 		t.Fatalf("%+v", r)
